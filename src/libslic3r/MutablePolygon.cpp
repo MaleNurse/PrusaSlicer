@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Lukáš Hejl @hejllukas, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "MutablePolygon.hpp"
 #include "Line.hpp"
 #include "libslic3r.h"
@@ -35,6 +39,36 @@ void remove_duplicates(MutablePolygon &polygon, double eps)
                 ++ it;
         }
     }
+}
+
+// Remove nearly duplicate points. If a distance between two points is less than scaled_eps
+// and if the angle between its surrounding lines is less than max_angle, the point will be removed.
+// May reduce the polygon down to empty polygon.
+void remove_duplicates(MutablePolygon &polygon, coord_t scaled_eps, const double max_angle)
+{
+    if (polygon.size() >= 3) {
+        auto cos_max_angle_2 = Slic3r::sqr<double>(cos(max_angle));
+        auto scaled_eps_sqr  = Slic3r::sqr<int64_t>(scaled_eps);
+        auto begin           = polygon.begin();
+        auto it              = begin;
+        for (++it; it != begin;) {
+            auto    prev        = it.prev();
+            auto    next        = it.next();
+            Vec2i64 v1          = (*it - *prev).cast<int64_t>();
+            int64_t v1_sqr_norm = v1.squaredNorm();
+            if (v1_sqr_norm < scaled_eps_sqr) {
+                if (Vec2i64 v2 = (*next - *prev).cast<int64_t>();
+                    Slic3r::sqr<double>(double(v1.dot(v2))) > cos_max_angle_2 * double(v1_sqr_norm) * double(v2.squaredNorm())) {
+                    it = it.remove();
+                    continue;
+                }
+            }
+            it = next;
+        }
+    }
+
+    if (polygon.size() < 3)
+        polygon.clear();
 }
 
 // Adapted from Cura ConstPolygonRef::smooth_corner_complex() by Tim Kuipers.

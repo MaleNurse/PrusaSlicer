@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2021 Lukáš Matěna @lukasmatena, Roman Beránek @zavorka, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, David Kocík @kocikdav, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Mouse3DController_hpp_
 #define slic3r_Mouse3DController_hpp_
 
@@ -33,6 +37,8 @@ class Mouse3DController
 	// to copy the parameters.
 	struct Params
 	{
+        static constexpr double MinTranslationScale = 0.1;
+        static constexpr double MaxTranslationScale = 30.;
 		static constexpr double DefaultTranslationScale = 2.5;
         static constexpr double MaxTranslationDeadzone = 0.2;
         static constexpr double DefaultTranslationDeadzone = 0.0;

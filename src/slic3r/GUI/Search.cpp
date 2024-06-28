@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2023 Pavel Mikuš @Godrak, Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Search.hpp"
 
 #include <cstddef>
@@ -12,10 +16,13 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "GUI_App.hpp"
-#include "Plater.hpp"
+#include "I18N.hpp"
+#include "format.hpp"
+#include "MainFrame.hpp"
 #include "Tab.hpp"
 
 #define FTS_FUZZY_MATCH_IMPLEMENTATION
+#include "ExtraRenderers.hpp"
 #include "fts_fuzzy_match.h"
 
 #include "imgui/imconfig.h"
@@ -23,6 +30,8 @@
 using boost::optional;
 
 namespace Slic3r {
+
+wxDEFINE_EVENT(wxCUSTOMEVT_JUMP_TO_OPTION, wxCommandEvent);
 
 using GUI::from_u8;
 using GUI::into_u8;
@@ -41,6 +50,8 @@ static char marker_by_type(Preset::Type type, PrinterTechnology pt)
         return ImGui::MaterialIconMarker;
     case Preset::TYPE_PRINTER:
         return pt == ptSLA ? ImGui::PrinterSlaIconMarker : ImGui::PrinterIconMarker;
+    case Preset::TYPE_PREFERENCES:
+        return ImGui::PreferencesButton;
     default:
         return ' ';
 	}
@@ -48,7 +59,7 @@ static char marker_by_type(Preset::Type type, PrinterTechnology pt)
 
 std::string Option::opt_key() const
 {
-    return boost::nowide::narrow(key).substr(2);
+    return into_u8(key).substr(2);
 }
 
 void FoundOption::get_marked_label_and_tooltip(const char** label_, const char** tooltip_) const
@@ -74,20 +85,31 @@ static std::string get_key(const std::string& opt_key, Preset::Type type)
     return std::to_string(int(type)) + ";" + opt_key;
 }
 
-void OptionsSearcher::append_options(DynamicPrintConfig* config, Preset::Type type, ConfigOptionMode mode)
+void OptionsSearcher::append_options(DynamicPrintConfig* config, Preset::Type type)
 {
-    auto emplace = [this, type](const std::string key, const wxString& label)
+    auto emplace = [this, type](std::string key, const wxString& label, int id = -1)
     {
+        if (id >= 0)
+            // ! It's very important to use "#". opt_key#n is a real option key used in GroupAndCategory
+            key += "#" + std::to_string(id);
+
         const GroupAndCategory& gc = groups_and_categories[key];
         if (gc.group.IsEmpty() || gc.category.IsEmpty())
             return;
 
         wxString suffix;
         wxString suffix_local;
-        if (gc.category == "Machine limits") {
-            suffix = key.back()=='1' ? L("Stealth") : L("Normal");
+        if (gc.category == "Machine limits" || gc.category == "Material printing profile") {
+            if (gc.category == "Machine limits")
+                suffix = id == 1 ? L("Stealth") : L("Normal");
+            else 
+                suffix = id == 1 ? L("Above") : L("Below");
             suffix_local = " " + _(suffix);
             suffix = " " + suffix;
+        }
+        else if (gc.group == "Dynamic overhang speed" && id >= 0) {
+            suffix = " " + std::to_string(id+1);
+            suffix_local = suffix;
         }
 
         if (!label.IsEmpty())
@@ -99,13 +121,13 @@ void OptionsSearcher::append_options(DynamicPrintConfig* config, Preset::Type ty
 
     for (std::string opt_key : config->keys())
     {
-        const ConfigOptionDef& opt = config->def()->options.at(opt_key);
+        const ConfigOptionDef& opt = *config->option_def(opt_key);
         if (opt.mode > mode)
             continue;
 
         int cnt = 0;
 
-        if ( (type == Preset::TYPE_SLA_MATERIAL || type == Preset::TYPE_PRINTER) && opt_key != "bed_shape" && opt_key != "thumbnails")
+        if ( type != Preset::TYPE_FILAMENT && !PresetCollection::is_independent_from_extruder_number_option(opt_key))
             switch (config->option(opt_key)->type())
             {
             case coInts:	change_opt_key<ConfigOptionInts		>(opt_key, config, cnt);	break;
@@ -114,6 +136,9 @@ void OptionsSearcher::append_options(DynamicPrintConfig* config, Preset::Type ty
             case coStrings:	change_opt_key<ConfigOptionStrings	>(opt_key, config, cnt);	break;
             case coPercents:change_opt_key<ConfigOptionPercents	>(opt_key, config, cnt);	break;
             case coPoints:	change_opt_key<ConfigOptionPoints	>(opt_key, config, cnt);	break;
+            case coFloatsOrPercents:	change_opt_key<ConfigOptionFloatsOrPercents	>(opt_key, config, cnt);	break;
+            case coEnums:	change_opt_key<ConfigOptionEnumsGeneric>(opt_key, config, cnt);	break;
+
             default:		break;
             }
 
@@ -124,8 +149,7 @@ void OptionsSearcher::append_options(DynamicPrintConfig* config, Preset::Type ty
             emplace(key, label);
         else
             for (int i = 0; i < cnt; ++i)
-                // ! It's very important to use "#". opt_key#n is a real option key used in GroupAndCategory
-                emplace(key + "#" + std::to_string(i), label);
+                emplace(key, label, i);
     }
 }
 
@@ -224,7 +248,7 @@ bool OptionsSearcher::search(const std::string& search, bool force/* = false*/)
         return out;
     };
 
-    auto get_tooltip = [this, &sep](const Option& opt)
+    auto get_tooltip = [this, &sep](const Option& opt) -> wxString
     {
         return  marker_by_type(opt.type, printer_technology) +
                 opt.category_local + sep +
@@ -237,7 +261,7 @@ bool OptionsSearcher::search(const std::string& search, bool force/* = false*/)
         const Option &opt = options[i];
         if (full_list) {
             std::string label = into_u8(get_label(opt));
-            found.emplace_back(FoundOption{ label, label, boost::nowide::narrow(get_tooltip(opt)), i, 0 });
+            found.emplace_back(FoundOption{ label, label, into_u8(get_tooltip(opt)), i, 0 });
             continue;
         }
 
@@ -274,7 +298,7 @@ bool OptionsSearcher::search(const std::string& search, bool force/* = false*/)
             boost::erase_all(label_plain, std::string(1, char(ImGui::ColorMarkerStart)));
             boost::erase_all(label_plain, std::string(1, char(ImGui::ColorMarkerEnd)));
 #endif
-	        found.emplace_back(FoundOption{ label_plain, label_u8, boost::nowide::narrow(get_tooltip(opt)), i, score });
+            found.emplace_back(FoundOption{ label_plain, label_u8, into_u8(get_tooltip(opt)), i, score });
         }
     }
 
@@ -289,39 +313,58 @@ bool OptionsSearcher::search(const std::string& search, bool force/* = false*/)
 
 OptionsSearcher::OptionsSearcher()
 {
-    search_dialog = new SearchDialog(this);
+    default_string = _L("Enter a search term");
 }
 
 OptionsSearcher::~OptionsSearcher()
 {
-    if (search_dialog)
-        search_dialog->Destroy();
 }
 
-void OptionsSearcher::init(std::vector<InputInfo> input_values)
+void OptionsSearcher::check_and_update(PrinterTechnology pt_in, ConfigOptionMode mode_in, std::vector<InputInfo> input_values)
 {
-    options.clear();
-    for (auto i : input_values)
-        append_options(i.config, i.type, i.mode);
-    sort_options();
-
-    search(search_line, true);
-}
-
-void OptionsSearcher::apply(DynamicPrintConfig* config, Preset::Type type, ConfigOptionMode mode)
-{
-    if (options.empty())
+    if (printer_technology == pt_in && mode == mode_in)
         return;
 
-    options.erase(std::remove_if(options.begin(), options.end(), [type](Option opt) {
-            return opt.type == type;
-        }), options.end());
+    options.clear();
 
-    append_options(config, type, mode);
+    printer_technology = pt_in;
+    mode = mode_in;
+
+    for (auto i : input_values)
+        append_options(i.config, i.type);
+
+    options.insert(options.end(), preferences_options.begin(), preferences_options.end());
 
     sort_options();
 
     search(search_line, true);
+}
+
+void OptionsSearcher::append_preferences_option(const GUI::Line& opt_line)
+{
+    Preset::Type type = Preset::TYPE_PREFERENCES;
+    wxString label = opt_line.label;
+    if (label.IsEmpty())
+        return;
+
+    std::string key = get_key(opt_line.get_options().front().opt_id, type);
+    const GroupAndCategory& gc = groups_and_categories[key];
+    if (gc.group.IsEmpty() || gc.category.IsEmpty())
+        return;        
+        
+    preferences_options.emplace_back(Search::Option{ boost::nowide::widen(key), type,
+                                label.ToStdWstring(), _(label).ToStdWstring(),
+                                gc.group.ToStdWstring(), _(gc.group).ToStdWstring(),
+                                gc.category.ToStdWstring(), _(gc.category).ToStdWstring() });
+}
+
+void OptionsSearcher::append_preferences_options(const std::vector<GUI::Line>& opt_lines)
+{
+    for (const GUI::Line& line : opt_lines) {
+        if (line.is_separator())
+            continue;
+        append_preferences_option(line);
+    }
 }
 
 const Option& OptionsSearcher::get_option(size_t pos_in_filter) const
@@ -386,6 +429,110 @@ Option OptionsSearcher::get_option(const std::string& opt_key, const wxString& l
     return create_option(opt_key, label, type, gc);
 }
 
+static bool has_focus(wxWindow* win)
+{
+    if (win->HasFocus())
+        return true;
+
+    auto children = win->GetChildren();
+    for (auto child : children) {
+        if (has_focus(child))
+            return true;
+    }
+
+    return false;
+}
+
+void OptionsSearcher::update_dialog_position()
+{
+    if (search_dialog) {
+        wxPoint old_pos = search_dialog->GetPosition();
+        wxPoint pos = search_input->GetScreenPosition() + wxPoint(-5, search_input->GetSize().y);
+        if (old_pos != pos)
+            search_dialog->SetPosition(pos);
+    }
+}
+
+void OptionsSearcher::check_and_hide_dialog()
+{
+    if (search_dialog && search_dialog->IsShown() && !has_focus(search_dialog))
+        show_dialog(false);
+}
+
+void OptionsSearcher::set_focus_to_parent()
+{
+    if (search_input)
+        search_input->GetParent()->SetFocus();
+}
+
+void OptionsSearcher::show_dialog(bool show /*= true*/)
+{
+    if (search_dialog && !show) {
+        search_dialog->EndModal(wxID_CLOSE);
+        return;
+    }
+
+    if (!search_dialog) {
+        search_dialog = new SearchDialog(this, search_input);
+
+        search_dialog->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& e)
+        {
+            if (search_dialog->IsShown() && !search_input->HasFocus())
+                show_dialog(false);
+            e.Skip();
+        });
+    }
+    update_dialog_position();
+
+    search_string();
+    search_input->SetSelection(-1,-1);
+
+    search_dialog->Popup();
+    if (!search_input->HasFocus())
+        search_input->SetFocus();
+}
+
+void OptionsSearcher::dlg_sys_color_changed()
+{
+    if (search_dialog)
+        search_dialog->on_sys_color_changed();
+}
+
+void OptionsSearcher::dlg_msw_rescale()
+{
+    if (search_dialog)
+        search_dialog->msw_rescale();
+}
+
+void OptionsSearcher::edit_search_input()
+{
+    if (!search_input)
+        return;
+
+    if (search_dialog) {
+        search_dialog->input_text(search_input->GetValue());
+        if (!search_dialog->IsShown())
+            search_dialog->Popup();
+    }
+    else
+        GUI::wxGetApp().show_search_dialog();
+}
+
+void OptionsSearcher::process_key_down_from_input(wxKeyEvent& e)
+{
+    int key = e.GetKeyCode();
+    if (key == WXK_ESCAPE)
+        search_dialog->EndModal(wxID_CLOSE);
+    else if (search_dialog && (key == WXK_UP || key == WXK_DOWN || key == WXK_NUMPAD_ENTER || key == WXK_RETURN))
+        search_dialog->KeyDown(e);
+}
+
+void OptionsSearcher::set_search_input(TextInput* input_ctrl)
+{
+    search_input = input_ctrl;
+    update_dialog_position();
+}
+
 void OptionsSearcher::add_key(const std::string& opt_key, Preset::Type type, const wxString& group, const wxString& category)
 {
     groups_and_categories[get_key(opt_key, type)] = GroupAndCategory{group, category};
@@ -402,21 +549,22 @@ static const std::map<const char, int> icon_idxs = {
     {ImGui::PrinterSlaIconMarker, 2},
     {ImGui::FilamentIconMarker  , 3},
     {ImGui::MaterialIconMarker  , 4},
+    {ImGui::PreferencesButton   , 5},
 };
 
-SearchDialog::SearchDialog(OptionsSearcher* searcher)
-    : GUI::DPIDialog(NULL, wxID_ANY, _L("Search"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+SearchDialog::SearchDialog(OptionsSearcher* searcher, wxWindow* parent)
+    : GUI::DPIDialog(parent ? parent : GUI::wxGetApp().tab_panel(), wxID_ANY, _L("Search"), wxDefaultPosition, wxDefaultSize, wxSTAY_ON_TOP | wxRESIZE_BORDER),
     searcher(searcher)
 {
     SetFont(GUI::wxGetApp().normal_font());
+#if _WIN32
     GUI::wxGetApp().UpdateDarkUI(this);
+#elif __WXGTK__
+    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+#endif
 
-    default_string = _L("Enter a search term");
     int border = 10;
     int em = em_unit();
-
-    search_line = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
-    GUI::wxGetApp().UpdateDarkUI(search_line);
 
     search_list = new wxDataViewCtrl(this, wxID_ANY, wxDefaultPosition, wxSize(em * 40, em * 30), wxDV_NO_HEADER | wxDV_SINGLE
 #ifdef _WIN32
@@ -427,6 +575,10 @@ SearchDialog::SearchDialog(OptionsSearcher* searcher)
     search_list_model = new SearchListModel(this);
     search_list->AssociateModel(search_list_model);
 
+#ifdef __WXMSW__
+    search_list->AppendColumn(new wxDataViewColumn("", new BitmapTextRenderer(true, wxDATAVIEW_CELL_INERT), SearchListModel::colIconMarkedText, wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT));
+    search_list->GetColumn(SearchListModel::colIconMarkedText)->SetWidth(48  * em_unit());
+#else
     search_list->AppendBitmapColumn("", SearchListModel::colIcon);
 
     wxDataViewTextRenderer* const markupRenderer = new wxDataViewTextRenderer();
@@ -439,12 +591,13 @@ SearchDialog::SearchDialog(OptionsSearcher* searcher)
 
     search_list->GetColumn(SearchListModel::colIcon      )->SetWidth(3  * em_unit());
     search_list->GetColumn(SearchListModel::colMarkedText)->SetWidth(40 * em_unit());
+#endif
 
     wxBoxSizer* check_sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    check_category  = new wxCheckBox(this, wxID_ANY, _L("Category"));
+    check_category  = new ::CheckBox(this, _L("Category"));
     if (GUI::wxGetApp().is_localized())
-        check_english   = new wxCheckBox(this, wxID_ANY, _L("Search in English"));
+        check_english   = new ::CheckBox(this, _L("Search in English"));
 
     wxStdDialogButtonSizer* cancel_btn = this->CreateStdDialogButtonSizer(wxCANCEL);
     GUI::wxGetApp().UpdateDarkUI(static_cast<wxButton*>(this->FindWindowById(wxID_CANCEL, this)));
@@ -458,14 +611,8 @@ SearchDialog::SearchDialog(OptionsSearcher* searcher)
 
     wxBoxSizer* topSizer = new wxBoxSizer(wxVERTICAL);
 
-    topSizer->Add(search_line, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(search_list, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(check_sizer, 0, wxEXPAND | wxALL, border);
-
-    search_line->Bind(wxEVT_TEXT,    &SearchDialog::OnInputText, this);
-    search_line->Bind(wxEVT_LEFT_UP, &SearchDialog::OnLeftUpInTextCtrl, this);
-    // process wxEVT_KEY_DOWN to navigate inside search_list, if ArrowUp/Down was pressed
-    search_line->Bind(wxEVT_KEY_DOWN,&SearchDialog::OnKeyDown, this);
 
     search_list->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED, &SearchDialog::OnSelect,    this);
     search_list->Bind(wxEVT_DATAVIEW_ITEM_ACTIVATED,    &SearchDialog::OnActivate,  this);
@@ -486,19 +633,20 @@ SearchDialog::SearchDialog(OptionsSearcher* searcher)
         check_english ->Bind(wxEVT_CHECKBOX, &SearchDialog::OnCheck, this);
 
 //    Bind(wxEVT_MOTION, &SearchDialog::OnMotion, this);
-    Bind(wxEVT_LEFT_DOWN, &SearchDialog::OnLeftDown, this);
+//    Bind(wxEVT_LEFT_DOWN, &SearchDialog::OnLeftDown, this);
 
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);
 }
 
+SearchDialog::~SearchDialog()
+{
+    if (search_list_model)
+        search_list_model->DecRef();
+}
+
 void SearchDialog::Popup(wxPoint position /*= wxDefaultPosition*/)
 {
-    const std::string& line = searcher->search_string();
-    search_line->SetValue(line.empty() ? default_string : from_u8(line));
-    search_line->SetFocus();
-    search_line->SelectAll();
-
     update_list();
 
     const OptionViewParameters& params = searcher->view_params;
@@ -506,38 +654,39 @@ void SearchDialog::Popup(wxPoint position /*= wxDefaultPosition*/)
     if (check_english)
         check_english->SetValue(params.english);
 
-    this->SetPosition(position);
-    this->ShowModal();
+    if (position != wxDefaultPosition)
+        this->SetPosition(position);
+#ifdef __APPLE__
+    this->ShowWithoutActivating();
+#else
+    this->Show();
+#endif
 }
 
 void SearchDialog::ProcessSelection(wxDataViewItem selection)
 {
     if (!selection.IsOk())
         return;
-
-    GUI::wxGetApp().sidebar().jump_to_option(search_list_model->GetRow(selection));
     this->EndModal(wxID_CLOSE);
+
+    // If call GUI::wxGetApp().sidebar.jump_to_option() directly from here,
+    // then mainframe will not have focus and found option will not be "active" (have cursor) as a result
+    // SearchDialog have to be closed and have to lose a focus
+    // and only after that jump_to_option() function can be called
+    // So, post event to plater: 
+    wxCommandEvent event(wxCUSTOMEVT_JUMP_TO_OPTION);
+    event.SetInt(search_list_model->GetRow(selection));
+    wxPostEvent(GUI::wxGetApp().mainframe, event);
 }
 
-void SearchDialog::OnInputText(wxCommandEvent&)
+void SearchDialog::input_text(wxString input_string)
 {
-    search_line->SetInsertionPointEnd();
-
-    wxString input_string = search_line->GetValue();
-    if (input_string == default_string)
+    if (input_string == searcher->default_string)
         input_string.Clear();
 
     searcher->search(into_u8(input_string));
 
     update_list();
-}
-
-void SearchDialog::OnLeftUpInTextCtrl(wxEvent& event)
-{
-    if (search_line->GetValue() == default_string)
-        search_line->SetValue("");
-
-    event.Skip();
 }
 
 void SearchDialog::OnKeyDown(wxKeyEvent& event)
@@ -548,7 +697,7 @@ void SearchDialog::OnKeyDown(wxKeyEvent& event)
     if (key == WXK_UP || key == WXK_DOWN)
     {
         // So, for the next correct navigation, set focus on the search_list
-        search_list->SetFocus();
+ //       search_list->SetFocus(); // #ys_delete_after_test -> Looks like no need anymore
 
         auto item = search_list->GetSelection();
 
@@ -643,16 +792,15 @@ void SearchDialog::OnLeftDown(wxMouseEvent& event)
     ProcessSelection(search_list->GetSelection());
 }
 
-void SearchDialog::on_dpi_changed(const wxRect& suggested_rect)
+void SearchDialog::msw_rescale()
 {
     const int& em = em_unit();
-
-    search_list_model->msw_rescale();
+#ifdef __WXMSW__
+    search_list->GetColumn(SearchListModel::colIconMarkedText)->SetWidth(48  * em);
+#else
     search_list->GetColumn(SearchListModel::colIcon      )->SetWidth(3  * em);
     search_list->GetColumn(SearchListModel::colMarkedText)->SetWidth(45 * em);
-
-    msw_buttons_rescale(this, em, { wxID_CANCEL });
-
+#endif
     const wxSize& size = wxSize(40 * em, 30 * em);
     SetMinSize(size);
 
@@ -665,12 +813,12 @@ void SearchDialog::on_sys_color_changed()
 #ifdef _WIN32
     GUI::wxGetApp().UpdateAllStaticTextDarkUI(this);
     GUI::wxGetApp().UpdateDarkUI(static_cast<wxButton*>(this->FindWindowById(wxID_CANCEL, this)), true);
-    for (wxWindow* win : std::vector<wxWindow*> {search_line, search_list, check_category, check_english})
+    for (wxWindow* win : std::vector<wxWindow*> {search_list, check_category, check_english})
         if (win) GUI::wxGetApp().UpdateDarkUI(win);
 #endif
 
     // msw_rescale updates just icons, so use it
-    search_list_model->msw_rescale();
+    search_list_model->sys_color_changed();
 
     Refresh();
 }
@@ -682,7 +830,7 @@ void SearchDialog::on_sys_color_changed()
 SearchListModel::SearchListModel(wxWindow* parent) : wxDataViewVirtualListModel(0)
 {
     int icon_id = 0;
-    for (const std::string& icon : { "cog", "printer", "sla_printer", "spool", "resin" })
+    for (const std::string& icon : { "cog", "printer", "sla_printer", "spool", "resin", "notification_preferences" })
         m_icon[icon_id++] = ScalableBitmap(parent, icon);    
 }
 
@@ -703,16 +851,21 @@ void SearchListModel::Prepend(const std::string& label)
     RowPrepended();
 }
 
-void SearchListModel::msw_rescale()
+void SearchListModel::sys_color_changed()
 {
     for (ScalableBitmap& bmp : m_icon)
-        bmp.msw_rescale();
+        bmp.sys_color_changed();
 }
 
 wxString SearchListModel::GetColumnType(unsigned int col) const 
 {
+#ifdef __WXMSW__
+    if (col == colIconMarkedText)
+        return "DataViewBitmapText";
+#else
     if (col == colIcon)
         return "wxBitmap";
+#endif
     return "string";
 }
 
@@ -721,12 +874,20 @@ void SearchListModel::GetValueByRow(wxVariant& variant,
 {
     switch (col)
     {
+#ifdef __WXMSW__
+    case colIconMarkedText: {
+        const ScalableBitmap& icon = m_icon[m_values[row].second];
+        variant << DataViewBitmapText(m_values[row].first, icon.bmp().GetBitmapFor(icon.parent()));
+        break;
+    }
+#else
     case colIcon: 
-        variant << m_icon[m_values[row].second].bmp();
+        variant << m_icon[m_values[row].second].bmp().GetBitmapFor(m_icon[m_values[row].second].parent());
         break;
     case colMarkedText:
         variant = m_values[row].first;
         break;
+#endif
     case colMax:
         wxFAIL_MSG("invalid column");
     default:

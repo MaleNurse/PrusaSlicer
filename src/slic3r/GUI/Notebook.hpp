@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Notebook_hpp_
 #define slic3r_Notebook_hpp_
 
@@ -5,7 +9,6 @@
 
 #include <wx/bookctrl.h>
 
-class ModeSizer;
 class ScalableButton;
 
 // custom message the ButtonsListCtrl sends to its parent (Notebook) to notify a selection change:
@@ -14,13 +17,13 @@ wxDECLARE_EVENT(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, wxCommandEvent);
 class ButtonsListCtrl : public wxControl
 {
 public:
-    ButtonsListCtrl(wxWindow* parent, bool add_mode_buttons = false);
+    ButtonsListCtrl(wxWindow* parent);
     ~ButtonsListCtrl() {}
 
     void OnPaint(wxPaintEvent&);
     void SetSelection(int sel);
-    void UpdateMode();
     void Rescale();
+    void OnColorsChanged();
     bool InsertPage(size_t n, const wxString& text, bool bSelect = false, const std::string& bmp_name = "");
     void RemovePage(size_t n);
     bool SetPageImage(size_t n, const std::string& bmp_name) const;
@@ -29,10 +32,12 @@ public:
 
 private:
     wxWindow*                       m_parent;
+    wxFlexGridSizer*                m_buttons_sizer;
     wxBoxSizer*                     m_sizer;
     std::vector<ScalableButton*>    m_pageButtons;
     int                             m_selection {-1};
-    ModeSizer*                      m_mode_sizer {nullptr};
+    int                             m_btn_margin;
+    int                             m_line_margin;
 };
 
 class Notebook: public wxBookCtrlBase
@@ -42,24 +47,22 @@ public:
                  wxWindowID winid = wxID_ANY,
                  const wxPoint & pos = wxDefaultPosition,
                  const wxSize & size = wxDefaultSize,
-                 long style = 0,
-                 bool add_mode_buttons = false)
+                 long style = 0)
     {
         Init();
-        Create(parent, winid, pos, size, style, add_mode_buttons);
+        Create(parent, winid, pos, size, style);
     }
 
     bool Create(wxWindow * parent,
                 wxWindowID winid = wxID_ANY,
                 const wxPoint & pos = wxDefaultPosition,
                 const wxSize & size = wxDefaultSize,
-                long style = 0,
-                bool add_mode_buttons = false)
+                long style = 0)
     {
         if (!wxBookCtrlBase::Create(parent, winid, pos, size, style | wxBK_TOP))
             return false;
 
-        m_bookctrl = new ButtonsListCtrl(this, add_mode_buttons);
+        m_bookctrl = new ButtonsListCtrl(this);
 
         wxSizer* mainSizer = new wxBoxSizer(IsVertical() ? wxVERTICAL : wxHORIZONTAL);
 
@@ -81,6 +84,9 @@ public:
             if (int page_idx = evt.GetId(); page_idx >= 0)
                 SetSelection(page_idx);
         });
+
+        this->Bind(wxEVT_NAVIGATION_KEY, &Notebook::OnNavigationKey, this);
+
         return true;
     }
 
@@ -162,8 +168,8 @@ public:
 
         GetBtnsListCtrl()->InsertPage(n, text, bSelect, bmp_name);
 
-        if (!DoSetSelectionAfterInsertion(n, bSelect))
-            page->Hide();
+        if (bSelect)
+            SetSelection(n);
 
         return true;
     }
@@ -171,7 +177,14 @@ public:
     virtual int SetSelection(size_t n) override
     {
         GetBtnsListCtrl()->SetSelection(n);
-        return DoSetSelection(n, SetSelection_SendEvent);
+        int ret = DoSetSelection(n, SetSelection_SendEvent);
+
+        // check that only the selected page is visible and others are hidden:
+        for (size_t page = 0; page < m_pages.size(); page++)
+            if (page != n)
+                m_pages[page]->Hide();
+
+        return ret;
     }
 
     virtual int ChangeSelection(size_t n) override
@@ -222,14 +235,97 @@ public:
 
     ButtonsListCtrl* GetBtnsListCtrl() const { return static_cast<ButtonsListCtrl*>(m_bookctrl); }
 
-    void UpdateMode()
-    {
-        GetBtnsListCtrl()->UpdateMode();
-    }
-
     void Rescale()
     {
         GetBtnsListCtrl()->Rescale();
+    }
+
+    void OnColorsChanged()
+    {
+        GetBtnsListCtrl()->OnColorsChanged();
+    }
+
+    void OnNavigationKey(wxNavigationKeyEvent& event)
+    {
+        if (event.IsWindowChange()) {
+            // change pages
+            AdvanceSelection(event.GetDirection());
+        }
+        else {
+            // we get this event in 3 cases
+            //
+            // a) one of our pages might have generated it because the user TABbed
+            // out from it in which case we should propagate the event upwards and
+            // our parent will take care of setting the focus to prev/next sibling
+            //
+            // or
+            //
+            // b) the parent panel wants to give the focus to us so that we
+            // forward it to our selected page. We can't deal with this in
+            // OnSetFocus() because we don't know which direction the focus came
+            // from in this case and so can't choose between setting the focus to
+            // first or last panel child
+            //
+            // or
+            //
+            // c) we ourselves (see MSWTranslateMessage) generated the event
+            //
+            wxWindow* const parent = GetParent();
+
+            // the wxObject* casts are required to avoid MinGW GCC 2.95.3 ICE
+            const bool isFromParent = event.GetEventObject() == (wxObject*)parent;
+            const bool isFromSelf = event.GetEventObject() == (wxObject*)this;
+            const bool isForward = event.GetDirection();
+
+            if (isFromSelf && !isForward)
+            {
+                // focus is currently on notebook tab and should leave
+                // it backwards (Shift-TAB)
+                event.SetCurrentFocus(this);
+                parent->HandleWindowEvent(event);
+            }
+            else if (isFromParent || isFromSelf)
+            {
+                // no, it doesn't come from child, case (b) or (c): forward to a
+                // page but only if entering notebook page (i.e. direction is
+                // backwards (Shift-TAB) comething from out-of-notebook, or
+                // direction is forward (TAB) from ourselves),
+                if (m_selection != wxNOT_FOUND &&
+                    (!event.GetDirection() || isFromSelf))
+                {
+                    // so that the page knows that the event comes from it's parent
+                    // and is being propagated downwards
+                    event.SetEventObject(this);
+
+                    wxWindow* page = m_pages[m_selection];
+                    if (!page->HandleWindowEvent(event))
+                    {
+                        page->SetFocus();
+                    }
+                    //else: page manages focus inside it itself
+                }
+                else // otherwise set the focus to the notebook itself
+                {
+                    SetFocus();
+                }
+            }
+            else
+            {
+                // it comes from our child, case (a), pass to the parent, but only
+                // if the direction is forwards. Otherwise set the focus to the
+                // notebook itself. The notebook is always the 'first' control of a
+                // page.
+                if (!isForward)
+                {
+                    SetFocus();
+                }
+                else if (parent)
+                {
+                    event.SetCurrentFocus(this);
+                    parent->HandleWindowEvent(event);
+                }
+            }
+        }
     }
 
 protected:

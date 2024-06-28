@@ -1,3 +1,12 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Pavel Mikuš @Godrak, Lukáš Hejl @hejllukas, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Vojtěch Král @vojtechkral
+///|/ Copyright (c) SuperSlicer 2019 Remi Durand @supermerill
+///|/
+///|/ ported from lib/Slic3r/Fill/Base.pm:
+///|/ Copyright (c) Prusa Research 2016 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_FillBase_hpp_
 #define slic3r_FillBase_hpp_
 
@@ -13,10 +22,11 @@
 #include "../BoundingBox.hpp"
 #include "../Exception.hpp"
 #include "../Utils.hpp"
+#include "../ExPolygon.hpp"
+#include "../PrintConfig.hpp"
 
 namespace Slic3r {
 
-class ExPolygon;
 class Surface;
 enum InfillPattern : int;
 
@@ -44,6 +54,9 @@ struct FillParams
     float       anchor_length       { 1000.f };
     float       anchor_length_max   { 1000.f };
 
+    // G-code resolution.
+    double      resolution          { 0.0125 };
+
     // Don't adjust spacing to fill the space evenly.
     bool        dont_adjust 	{ true };
 
@@ -54,6 +67,14 @@ struct FillParams
     // we were requested to complete each loop;
     // in this case we don't try to make more continuous paths
     bool        complete 		{ false };
+
+    // For Concentric infill, to switch between Classic and Arachne.
+    bool        use_arachne     { false };
+    // Layer height for Concentric infill with Arachne.
+    coordf_t    layer_height    { 0.f };
+
+    // For infills that produce closed loops to force printing those loops clockwise.
+    bool        prefer_clockwise_movements { false };
 };
 static_assert(IsTriviallyCopyable<FillParams>::value, "FillParams class is not POD (and it should be - see constructor).");
 
@@ -82,6 +103,10 @@ public:
     // Octree builds on mesh for usage in the adaptive cubic infill
     FillAdaptive::Octree* adapt_fill_octree = nullptr;
 
+    // PrintConfig and PrintObjectConfig are used by infills that use Arachne (Concentric and FillEnsuring).
+    const PrintConfig       *print_config        = nullptr;
+    const PrintObjectConfig *print_object_config = nullptr;
+
 public:
     virtual ~Fill() {}
     virtual Fill* clone() const = 0;
@@ -98,8 +123,11 @@ public:
     // Do not sort the fill lines to optimize the print head path?
     virtual bool no_sort() const { return false; }
 
+    virtual bool is_self_crossing() = 0;
+
     // Perform the fill.
     virtual Polylines fill_surface(const Surface *surface, const FillParams &params);
+    virtual ThickPolylines fill_surface_arachne(const Surface *surface, const FillParams &params);
 
 protected:
     Fill() :
@@ -118,17 +146,24 @@ protected:
 
     // The expolygon may be modified by the method to avoid a copy.
     virtual void    _fill_surface_single(
-        const FillParams                & /* params */, 
+        const FillParams                & /* params */,
         unsigned int                      /* thickness_layers */,
-        const std::pair<float, Point>   & /* direction */, 
+        const std::pair<float, Point>   & /* direction */,
         ExPolygon                         /* expolygon */,
-        Polylines                       & /* polylines_out */) {};
+        Polylines                       & /* polylines_out */) {}
+
+    // Used for concentric infill to generate ThickPolylines using Arachne.
+    virtual void _fill_surface_single(const FillParams              &params,
+                                      unsigned int                   thickness_layers,
+                                      const std::pair<float, Point> &direction,
+                                      ExPolygon                      expolygon,
+                                      ThickPolylines                &thick_polylines_out) {}
 
     virtual float _layer_angle(size_t idx) const { return (idx & 1) ? float(M_PI/2.) : 0; }
 
-    virtual std::pair<float, Point> _infill_direction(const Surface *surface) const;
 
 public:
+    virtual std::pair<float, Point> _infill_direction(const Surface *surface) const;
     static void connect_infill(Polylines &&infill_ordered, const ExPolygon &boundary, Polylines &polylines_out, const double spacing, const FillParams &params);
     static void connect_infill(Polylines &&infill_ordered, const Polygons &boundary, const BoundingBox& bbox, Polylines &polylines_out, const double spacing, const FillParams &params);
     static void connect_infill(Polylines &&infill_ordered, const std::vector<const Polygon*> &boundary, const BoundingBox &bbox, Polylines &polylines_out, double spacing, const FillParams &params);

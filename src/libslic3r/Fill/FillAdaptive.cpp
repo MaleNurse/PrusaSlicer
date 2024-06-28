@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2022 Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "../ClipperUtils.hpp"
 #include "../ExPolygon.hpp"
 #include "../Surface.hpp"
@@ -316,9 +320,9 @@ std::pair<double, double> adaptive_fill_line_spacing(const PrintObject &print_ob
         for (const Layer *layer : print_object.layers())
             for (size_t region_id = 0; region_id < layer->regions().size(); ++ region_id) {
                 RegionFillData &rd = region_fill_data[region_id];
-                if (rd.has_adaptive_infill == Tristate::Maybe && ! layer->regions()[region_id]->fill_surfaces.empty())
+                if (rd.has_adaptive_infill == Tristate::Maybe && ! layer->regions()[region_id]->fill_surfaces().empty())
                     rd.has_adaptive_infill = Tristate::Yes;
-                if (rd.has_support_infill == Tristate::Maybe && ! layer->regions()[region_id]->fill_surfaces.empty())
+                if (rd.has_support_infill == Tristate::Maybe && ! layer->regions()[region_id]->fill_surfaces().empty())
                     rd.has_support_infill = Tristate::Yes;
             }
 
@@ -928,7 +932,9 @@ static Polylines connect_lines_using_hooks(Polylines &&lines, const ExPolygon &b
                             Linef l { { bg::get<0, 0>(seg), bg::get<0, 1>(seg) }, { bg::get<1, 0>(seg), bg::get<1, 1>(seg) } };
                             assert(line_alg::distance_to_squared(l, Vec2d(pt.cast<double>())) > 1000 * 1000);
     #endif // NDEBUG
-                        } else if (((Line)pl).distance_to_squared(pt) <= 1000 * 1000)
+                        } else if (pl.size() >= 2 && 
+                            //FIXME Hoping that pl is really a line, trimmed by a polygon using ClipperUtils. Sometimes Clipper leaves some additional collinear points on the polyline, let's hope it is all right.
+                            Line{ pl.front(), pl.back() }.distance_to_squared(pt) <= 1000 * 1000)
                             out = closest.front().second;
                     }
                     return out;

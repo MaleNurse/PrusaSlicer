@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_SearchComboBox_hpp_
 #define slic3r_SearchComboBox_hpp_
 
@@ -17,10 +21,17 @@
 
 #include "GUI_Utils.hpp"
 #include "wxExtensions.hpp"
+#include "OptionsGroup.hpp"
 #include "libslic3r/Preset.hpp"
 
+#include "Widgets/CheckBox.hpp"
+
+class CheckBox;
+class TextInput;
 
 namespace Slic3r {
+
+wxDECLARE_EVENT(wxCUSTOMEVT_JUMP_TO_OPTION, wxCommandEvent);
 
 namespace Search{
 
@@ -30,7 +41,6 @@ struct InputInfo
 {
     DynamicPrintConfig* config  {nullptr};
     Preset::Type        type    {Preset::TYPE_INVALID};
-    ConfigOptionMode    mode    {comSimple};
 };
 
 struct GroupAndCategory {
@@ -80,12 +90,16 @@ class OptionsSearcher
 {
     std::string                             search_line;
     std::map<std::string, GroupAndCategory> groups_and_categories;
-    PrinterTechnology                       printer_technology;
+    PrinterTechnology                       printer_technology {ptAny};
+    ConfigOptionMode                        mode{ comUndef };
+    TextInput*                              search_input    { nullptr };
+    SearchDialog*                           search_dialog   { nullptr };
 
     std::vector<Option>                     options {};
+    std::vector<Option>                     preferences_options {};
     std::vector<FoundOption>                found {};
 
-    void append_options(DynamicPrintConfig* config, Preset::Type type, ConfigOptionMode mode);
+    void append_options(DynamicPrintConfig* config, Preset::Type type);
 
     void sort_options() {
         std::sort(options.begin(), options.end(), [](const Option& o1, const Option& o2) {
@@ -101,16 +115,16 @@ class OptionsSearcher
 
 public:
     OptionViewParameters                    view_params;
-
-    SearchDialog*                           search_dialog { nullptr };
+    wxString                                default_string;
 
     OptionsSearcher();
     ~OptionsSearcher();
 
-    void init(std::vector<InputInfo> input_values);
-    void apply(DynamicPrintConfig *config,
-               Preset::Type        type,
-               ConfigOptionMode    mode);
+    void append_preferences_option(const GUI::Line& opt_line);
+    void append_preferences_options(const std::vector<GUI::Line>& opt_lines);
+    void check_and_update(  PrinterTechnology pt_in, 
+                            ConfigOptionMode mode_in, 
+                            std::vector<InputInfo> input_values);
     bool search();
     bool search(const std::string& search, bool force = false);
 
@@ -127,13 +141,22 @@ public:
     const GroupAndCategory&         get_group_and_category (const std::string& opt_key) { return groups_and_categories[opt_key]; }
     std::string& search_string() { return search_line; }
 
-    void set_printer_technology(PrinterTechnology pt) { printer_technology = pt; }
-
     void sort_options_by_key() {
         std::sort(options.begin(), options.end(), [](const Option& o1, const Option& o2) {
             return o1.key < o2.key; });
     }
     void sort_options_by_label() { sort_options(); }
+
+    void update_dialog_position();
+    void edit_search_input();
+    void process_key_down_from_input(wxKeyEvent& e);
+    void check_and_hide_dialog();
+    void set_focus_to_parent();
+    void show_dialog(bool show = true);
+    void dlg_sys_color_changed();
+    void dlg_msw_rescale();
+
+    void set_search_input(TextInput* input_ctrl);
 };
 
 
@@ -144,20 +167,16 @@ class SearchListModel;
 class SearchDialog : public GUI::DPIDialog
 {
     wxString search_str;
-    wxString default_string;
 
     bool     prevent_list_events {false};
 
-    wxTextCtrl*         search_line         { nullptr };
     wxDataViewCtrl*     search_list         { nullptr };
     SearchListModel*    search_list_model   { nullptr };
-    wxCheckBox*         check_category      { nullptr };
-    wxCheckBox*         check_english       { nullptr };
+    CheckBox*           check_category      { nullptr };
+    CheckBox*           check_english       { nullptr };
 
     OptionsSearcher*    searcher            { nullptr };
 
-    void OnInputText(wxCommandEvent& event);
-    void OnLeftUpInTextCtrl(wxEvent& event);
     void OnKeyDown(wxKeyEvent& event);
 
     void OnActivate(wxDataViewEvent& event);
@@ -170,15 +189,20 @@ class SearchDialog : public GUI::DPIDialog
     void update_list();
 
 public:
-    SearchDialog(OptionsSearcher* searcher);
-    ~SearchDialog() {}
+    SearchDialog(OptionsSearcher* searcher, wxWindow* parent);
+    ~SearchDialog();
 
     void Popup(wxPoint position = wxDefaultPosition);
     void ProcessSelection(wxDataViewItem selection);
 
-protected:
-    void on_dpi_changed(const wxRect& suggested_rect) override;
+    void msw_rescale();
     void on_sys_color_changed() override;
+
+    void input_text(wxString input);
+    void KeyDown(wxKeyEvent& event) { OnKeyDown(event); }
+
+protected:
+    void on_dpi_changed(const wxRect& suggested_rect) override { msw_rescale(); }
 };
 
 
@@ -189,12 +213,16 @@ protected:
 class SearchListModel : public wxDataViewVirtualListModel
 {
     std::vector<std::pair<wxString, int>>   m_values;
-    ScalableBitmap                          m_icon[5];
+    ScalableBitmap                          m_icon[6];
 
 public:
     enum {
+#ifdef __WXMSW__
+        colIconMarkedText,
+#else
         colIcon,
         colMarkedText,
+#endif
         colMax
     };
 
@@ -204,7 +232,7 @@ public:
 
     void Clear();
     void Prepend(const std::string& text);
-    void msw_rescale();
+    void sys_color_changed();
 
     // implementation of base class virtuals to define model
 

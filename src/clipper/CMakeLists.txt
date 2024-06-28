@@ -1,5 +1,5 @@
+cmake_minimum_required(VERSION 2.8.12)
 project(clipper)
-cmake_minimum_required(VERSION 2.6)
 
 add_library(clipper STATIC
 # We are using ClipperLib compiled as part of the libslic3r project using Slic3r::Point as its base type.
@@ -9,6 +9,4 @@ add_library(clipper STATIC
     clipper_z.hpp
 )
 
-if(SLIC3R_PROFILE)
-    target_link_libraries(clipper Shiny)
-endif()
+target_link_libraries(clipper TBB::tbb TBB::tbbmalloc)

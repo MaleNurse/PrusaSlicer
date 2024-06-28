@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Oleksandra Iushchenko @YuSanka, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Notebook.hpp"
 
 #ifdef _WIN32
@@ -10,21 +14,22 @@
 
 wxDEFINE_EVENT(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, wxCommandEvent);
 
-ButtonsListCtrl::ButtonsListCtrl(wxWindow *parent, bool add_mode_buttons/* = false*/) :
+ButtonsListCtrl::ButtonsListCtrl(wxWindow *parent) :
     wxControl(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxTAB_TRAVERSAL)
 {
 #ifdef __WINDOWS__
     SetDoubleBuffered(true);
 #endif //__WINDOWS__
 
+    int em = em_unit(this);// Slic3r::GUI::wxGetApp().em_unit();
+    m_btn_margin  = std::lround(0.3 * em);
+    m_line_margin = std::lround(0.1 * em);
+
     m_sizer = new wxBoxSizer(wxHORIZONTAL);
     this->SetSizer(m_sizer);
 
-    if (add_mode_buttons) {
-        m_mode_sizer = new ModeSizer(this, int(0.5 * em_unit(this)));
-        m_sizer->AddStretchSpacer(20);
-        m_sizer->Add(m_mode_sizer, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-    }
+    m_buttons_sizer = new wxFlexGridSizer(1, m_btn_margin, m_btn_margin);
+    m_sizer->Add(m_buttons_sizer, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxBOTTOM, m_btn_margin);
 
     this->Bind(wxEVT_PAINT, &ButtonsListCtrl::OnPaint, this);
 }
@@ -38,12 +43,13 @@ void ButtonsListCtrl::OnPaint(wxPaintEvent&)
     if (m_selection < 0 || m_selection >= (int)m_pageButtons.size())
         return;
 
-    // highlight selected button
-
     const wxColour& selected_btn_bg  = Slic3r::GUI::wxGetApp().get_color_selected_btn_bg();
     const wxColour& default_btn_bg   = Slic3r::GUI::wxGetApp().get_highlight_default_clr();
     const wxColour& btn_marker_color = Slic3r::GUI::wxGetApp().get_color_hovered_btn_label();
-    for (int idx = 0; idx < m_pageButtons.size(); idx++) {
+
+    // highlight selected notebook button
+
+    for (int idx = 0; idx < int(m_pageButtons.size()); idx++) {
         wxButton* btn = m_pageButtons[idx];
 
         btn->SetBackgroundColour(idx == m_selection ? selected_btn_bg : default_btn_bg);
@@ -53,24 +59,33 @@ void ButtonsListCtrl::OnPaint(wxPaintEvent&)
         const wxColour& clr = idx == m_selection ? btn_marker_color : default_btn_bg;
         dc.SetPen(clr);
         dc.SetBrush(clr);
-        dc.DrawRectangle(pos.x, sz.y - 3, size.x, 3);
+        dc.DrawRectangle(pos.x, pos.y + size.y, size.x, sz.y - size.y);
     }
+
+    // Draw orange bottom line
 
     dc.SetPen(btn_marker_color);
     dc.SetBrush(btn_marker_color);
-    dc.DrawRectangle(1, sz.y - 1, sz.x, 1);
-}
-
-void ButtonsListCtrl::UpdateMode()
-{
-    m_mode_sizer->SetMode(Slic3r::GUI::wxGetApp().get_mode());
+    dc.DrawRectangle(1, sz.y - m_line_margin, sz.x, m_line_margin);
 }
 
 void ButtonsListCtrl::Rescale()
 {
-    m_mode_sizer->msw_rescale();
+    int em = em_unit(this);
+    m_btn_margin = std::lround(0.3 * em);
+    m_line_margin = std::lround(0.1 * em);
+    m_buttons_sizer->SetVGap(m_btn_margin);
+    m_buttons_sizer->SetHGap(m_btn_margin);
+
+    m_sizer->Layout();
+}
+
+void ButtonsListCtrl::OnColorsChanged()
+{
     for (ScalableButton* btn : m_pageButtons)
-        btn->msw_rescale();
+        btn->sys_color_changed();
+
+    m_sizer->Layout();
 }
 
 void ButtonsListCtrl::SetSelection(int sel)
@@ -95,7 +110,8 @@ bool ButtonsListCtrl::InsertPage(size_t n, const wxString& text, bool bSelect/* 
     });
     Slic3r::GUI::wxGetApp().UpdateDarkUI(btn);
     m_pageButtons.insert(m_pageButtons.begin() + n, btn);
-    m_sizer->Insert(n, new wxSizerItem(btn, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3));
+    m_buttons_sizer->Insert(n, new wxSizerItem(btn));
+    m_buttons_sizer->SetCols(m_buttons_sizer->GetCols() + 1);
     m_sizer->Layout();
     return true;
 }
@@ -104,7 +120,7 @@ void ButtonsListCtrl::RemovePage(size_t n)
 {
     ScalableButton* btn = m_pageButtons[n];
     m_pageButtons.erase(m_pageButtons.begin() + n);
-    m_sizer->Remove(n);
+    m_buttons_sizer->Remove(n);
     btn->Reparent(nullptr);
     btn->Destroy();
     m_sizer->Layout();

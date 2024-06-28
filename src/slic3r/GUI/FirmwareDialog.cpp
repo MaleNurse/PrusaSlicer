@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966, Lukáš Matěna @lukasmatena, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include <numeric>
 #include <algorithm>
 #include <thread>
@@ -65,6 +69,8 @@ enum {
 	USB_PID_MMU_APP  = 4,
 	USB_PID_CW1_BOOT = 7,
 	USB_PID_CW1_APP  = 8,
+	USB_PID_CW1S_BOOT = 14,
+	USB_PID_CW1S_APP  = 15,
 };
 
 // This enum discriminates the kind of information in EVT_AVRDUDE,
@@ -268,13 +274,12 @@ void FirmwareDialog::priv::flashing_start(unsigned tasks)
 
 void FirmwareDialog::priv::flashing_done(AvrDudeComplete complete)
 {
-	auto text_color = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
 	port_picker->Enable();
 	btn_rescan->Enable();
 	hex_picker->Enable();
 	btn_close->Enable();
 	btn_flash->SetLabel(btn_flash_label_ready);
-	txt_status->SetForegroundColour(text_color);
+	txt_status->SetForegroundColour(GUI::wxGetApp().get_label_clr_default());
 	timer_pulse.Stop();
 	progressbar->SetValue(progressbar->GetRange());
 
@@ -308,7 +313,7 @@ void FirmwareDialog::priv::update_flash_enabled()
 void FirmwareDialog::priv::load_hex_file(const wxString &path)
 {
 	hex_file = HexFile(path.wx_str());
-	const bool autodetect = hex_file.device == HexFile::DEV_MM_CONTROL || hex_file.device == HexFile::DEV_CW1;
+	const bool autodetect = hex_file.device == HexFile::DEV_MM_CONTROL || hex_file.device == HexFile::DEV_CW1 || hex_file.device == HexFile::DEV_CW1S;
 	set_autodetect(autodetect);
 }
 
@@ -636,6 +641,10 @@ void FirmwareDialog::priv::perform_upload()
 					this->prepare_avr109(Avr109Pid(USB_PID_CW1_BOOT, USB_PID_CW1_APP));
 					break;
 
+				case HexFile::DEV_CW1S:
+					this->prepare_avr109(Avr109Pid(USB_PID_CW1S_BOOT, USB_PID_CW1S_APP));
+					break;
+
 				default:
 					this->prepare_mk2();
 					break;
@@ -649,7 +658,7 @@ void FirmwareDialog::priv::perform_upload()
 			}
 		})
 		.on_message([
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__clang__)
 	        // clang complains when capturing constants.
 			extra_verbose,
 #endif // __APPLE__
@@ -766,12 +775,11 @@ void FirmwareDialog::priv::ensure_joined()
 const char* FirmwareDialog::priv::avr109_dev_name(Avr109Pid usb_pid) {
 	switch (usb_pid.boot) {
 		case USB_PID_MMU_BOOT:
-			return "Original Prusa MMU 2.0 Control";
-		break;
+			return "Original Prusa Multi Material 2 & 3 Upgrade (bootloader)";
 		case USB_PID_CW1_BOOT:
 			return "Original Prusa CW1";
-		break;
-
+		case USB_PID_CW1S_BOOT:
+			return "Original Prusa CW1S";
 		default: throw Slic3r::RuntimeError((boost::format("Invalid avr109 device USB PID: %1%") % usb_pid.boot).str());
 	}
 }
@@ -806,14 +814,16 @@ FirmwareDialog::FirmwareDialog(wxWindow *parent) :
 	panel->SetSizer(vsizer);
 
 	auto *label_hex_picker = new wxStaticText(panel, wxID_ANY, _(L("Firmware image:")));
-	p->hex_picker = new wxFilePickerCtrl(panel, wxID_ANY, wxEmptyString, wxFileSelectorPromptStr,
+	p->hex_picker = new wxFilePickerCtrl(panel, wxID_ANY, wxEmptyString, /*wxFileSelectorPromptStr*/_L("Select a file"),
 		"Hex files (*.hex)|*.hex|All files|*.*");
 	p->hex_picker->GetPickerCtrl()->SetLabelText(_(L("Browse")));
+	GUI::wxGetApp().SetWindowVariantForButton(static_cast<wxButton*>(p->hex_picker->GetPickerCtrl()));
 
 	auto *label_port_picker = new wxStaticText(panel, wxID_ANY, _(L("Serial port:")));
 	p->port_picker = new wxComboBox(panel, wxID_ANY);
 	p->txt_port_autodetect = new wxStaticText(panel, wxID_ANY, _(L("Autodetected")));
 	p->btn_rescan = new wxButton(panel, wxID_ANY, _(L("Rescan")));
+    GUI::wxGetApp().SetWindowVariantForButton(p->btn_rescan);
 	auto *port_sizer = new wxBoxSizer(wxHORIZONTAL);
 	port_sizer->Add(p->port_picker, 1, wxEXPAND | wxRIGHT, SPACING);
 	port_sizer->Add(p->btn_rescan, 0);
@@ -837,7 +847,7 @@ FirmwareDialog::FirmwareDialog(wxWindow *parent) :
 	grid->Add(port_sizer, 0, wxEXPAND);
 
 	grid->Add(label_progress, 0, wxALIGN_CENTER_VERTICAL);
-	grid->Add(p->progressbar, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+	grid->Add(p->progressbar, 1, wxEXPAND);
 
 	grid->Add(label_status, 0, wxALIGN_CENTER_VERTICAL);
 	grid->Add(p->txt_status, 0, wxEXPAND);
@@ -856,7 +866,9 @@ FirmwareDialog::FirmwareDialog(wxWindow *parent) :
 	vsizer->Add(p->spoiler, 1, wxEXPAND | wxBOTTOM, SPACING);
 
 	p->btn_close = new wxButton(panel, wxID_CLOSE, _(L("Close")));   // Note: The label needs to be present, otherwise we get accelerator bugs on Mac
+	GUI::wxGetApp().SetWindowVariantForButton(p->btn_close);
 	p->btn_flash = new wxButton(panel, wxID_ANY, p->btn_flash_label_ready);
+	GUI::wxGetApp().SetWindowVariantForButton(p->btn_flash);
 	p->btn_flash->Disable();
 	auto *bsizer = new wxBoxSizer(wxHORIZONTAL);
 	bsizer->Add(p->btn_close);

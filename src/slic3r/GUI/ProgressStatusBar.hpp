@@ -1,3 +1,11 @@
+///|/ Copyright (c) Prusa Research 2018 - 2021 David Kocík @kocikdav, Oleksandra Iushchenko @YuSanka, Tomáš Mészáros @tamasmeszaros, Vojtěch Král @vojtechkral, Vojtěch Bubník @bubnikv
+///|/
+///|/ ported from lib/Slic3r/GUI/ProgressStatusBar.pm:
+///|/ Copyright (c) Prusa Research 2016 - 2018 Vojtěch Bubník @bubnikv, Tomáš Mészáros @tamasmeszaros
+///|/ Copyright (c) Slic3r 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef PROGRESSSTATUSBAR_HPP
 #define PROGRESSSTATUSBAR_HPP
 
@@ -25,6 +33,7 @@ namespace Slic3r {
  * of the Slicer main window. It consists of a message area to the left and a
  * progress indication area to the right with an optional cancel button.
  */
+ 
 class ProgressStatusBar : public ProgressIndicator
 {
     wxStatusBar *self;      // we cheat! It should be the base class but: perl!
@@ -56,10 +65,6 @@ public:
     void        set_status_text(const char *txt) override;
     wxString    get_status_text() const;
     void        set_font(const wxFont &font);
-
-    // Temporary methods to satisfy Perl side
-    void        show_cancel_button();
-    void        hide_cancel_button();
 
     void        update_dark_ui();
 

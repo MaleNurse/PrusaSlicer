@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2021 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GUI_ExtraRenderers_hpp_
 #define slic3r_GUI_ExtraRenderers_hpp_
 
@@ -158,6 +162,31 @@ private:
     DataViewBitmapText      m_value;
     std::function<bool()>   can_create_editor_ctrl  { nullptr };
     std::function<int()>    get_default_extruder_idx{ nullptr };
+};
+
+
+
+// ----------------------------------------------------------------------------
+// TextRenderer
+// ----------------------------------------------------------------------------
+
+class TextRenderer : public wxDataViewCustomRenderer
+{
+public:
+    TextRenderer(wxDataViewCellMode mode = wxDATAVIEW_CELL_INERT
+        , int align = wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL
+    ) : wxDataViewCustomRenderer(wxT("string"), mode, align) {}
+
+    bool SetValue(const wxVariant& value) override;
+    bool GetValue(wxVariant& value) const override;
+
+    virtual bool Render(wxRect cell, wxDC* dc, int state) override;
+    virtual wxSize GetSize() const override;
+
+    bool        HasEditorCtrl() const override { return false; }
+
+private:
+    wxString    m_value;
 };
 
 

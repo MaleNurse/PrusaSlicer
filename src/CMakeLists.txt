@@ -4,23 +4,34 @@ project(PrusaSlicer-native)
 add_subdirectory(build-utils)
 add_subdirectory(admesh)
 add_subdirectory(avrdude)
-# boost/nowide
-add_subdirectory(boost)
 add_subdirectory(clipper)
 add_subdirectory(miniz)
 add_subdirectory(glu-libtess)
-add_subdirectory(qhull)
-add_subdirectory(Shiny)
 add_subdirectory(semver)
 add_subdirectory(libigl)
-
-# Adding libnest2d project for bin packing...
+add_subdirectory(hints)
+add_subdirectory(qoi)
 add_subdirectory(libnest2d)
+
+find_package(Qhull 7.2 REQUIRED)
+add_library(qhull INTERFACE)
+if(SLIC3R_STATIC)
+    slic3r_remap_configs("Qhull::qhullcpp;Qhull::qhullstatic_r" RelWithDebInfo Release)
+    target_link_libraries(qhull INTERFACE Qhull::qhullcpp Qhull::qhullstatic_r)
+else()
+    slic3r_remap_configs("Qhull::qhullcpp;Qhull::qhull_r" RelWithDebInfo Release)
+    target_link_libraries(qhull INTERFACE Qhull::qhullcpp Qhull::qhull_r)
+endif()
 
 add_subdirectory(libslic3r)
 
+if (SLIC3R_ENABLE_FORMAT_STEP)
+    add_subdirectory(occt_wrapper)
+endif ()
+
 if (SLIC3R_GUI)
     add_subdirectory(imgui)
+    add_subdirectory(libvgcode)
     add_subdirectory(hidapi)
     include_directories(hidapi/include)
 
@@ -37,46 +48,28 @@ if (SLIC3R_GUI)
 
     if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set (wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
-        if (SLIC3R_WX_STABLE)
-            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl)
-        else ()
-            find_package(wxWidgets 3.1 QUIET COMPONENTS base core adv html gl)
-
-            if (NOT wxWidgets_FOUND)
-                message(FATAL_ERROR "\nCould not find wxWidgets 3.1.\n"
-                    "Hint: On Linux you can set -DSLIC3R_WX_STABLE=1 to use wxWidgets 3.0\n")
-            endif ()
-        endif ()
-    else ()
-        find_package(wxWidgets 3.1 REQUIRED COMPONENTS html adv gl core base)
     endif ()
+    find_package(wxWidgets 3.2 MODULE REQUIRED COMPONENTS base core adv html gl webview)
+
+    include(${wxWidgets_USE_FILE})
+
+    slic3r_remap_configs(wx::wxhtml wx::wxadv wx::wxgl wx::wxcore wx::wxbase RelWithDebInfo Release)
 
     if(UNIX)
         message(STATUS "wx-config path: ${wxWidgets_CONFIG_EXECUTABLE}")
     endif()
 
-    include(${wxWidgets_USE_FILE})
+    find_package(JPEG MODULE QUIET)
+    find_package(NanoSVG REQUIRED)
 
     string(REGEX MATCH "wxpng" WX_PNG_BUILTIN ${wxWidgets_LIBRARIES})
-    if (NOT WX_PNG_BUILTIN)
-        find_package(JPEG QUIET)
-        if (PNG_FOUND)
-            list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX png)
-            list(APPEND wxWidgets_LIBRARIES ${PNG_LIBRARIES})
-        endif ()
-    endif ()
-
-    string(REGEX MATCH "wxtiff" WX_TIFF_BUILTIN ${wxWidgets_LIBRARIES})
-    if (NOT WX_TIFF_BUILTIN)
-        find_package(TIFF QUIET)
-        if (TIFF_FOUND)
-            list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX tiff)
-            list(APPEND wxWidgets_LIBRARIES ${TIFF_LIBRARIES})
-        endif ()
+    if (PNG_FOUND AND NOT WX_PNG_BUILTIN)
+        list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX png)
+        list(APPEND wxWidgets_LIBRARIES ${PNG_LIBRARIES})
     endif ()
 
     string(REGEX MATCH "wxjpeg" WX_JPEG_BUILTIN ${wxWidgets_LIBRARIES})
-    if (TIFF_FOUND AND NOT WX_JPEG_BUILTIN)
+    if (JPEG_FOUND AND NOT WX_JPEG_BUILTIN)
         list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX jpeg)
         list(APPEND wxWidgets_LIBRARIES ${JPEG_LIBRARIES})
     endif ()
@@ -84,8 +77,9 @@ if (SLIC3R_GUI)
     string(REGEX MATCH "wxexpat" WX_EXPAT_BUILTIN ${wxWidgets_LIBRARIES})
     if (EXPAT_FOUND AND NOT WX_EXPAT_BUILTIN)
         list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX expat)
-        list(APPEND wxWidgets_LIBRARIES ${EXPAT_LIBRARIES})
+        list(APPEND wxWidgets_LIBRARIES libexpat)
     endif ()
+    
     # This is an issue in the new wxWidgets cmake build, doesn't deal with librt
     find_library(LIBRT rt)
     if(LIBRT)
@@ -96,7 +90,10 @@ if (SLIC3R_GUI)
     # wrong libs for opengl in the link line and it does not link to it by himself.
     # libslic3r_gui will link to opengl anyway, so lets override wx
     list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX OpenGL)
-
+    
+    if (UNIX AND NOT APPLE)
+        list(APPEND wxWidgets_LIBRARIES X11 wayland-client wayland-egl EGL)
+    endif ()
 #    list(REMOVE_ITEM wxWidgets_LIBRARIES oleacc)
     message(STATUS "wx libs: ${wxWidgets_LIBRARIES}")
 
@@ -126,7 +123,8 @@ if (NOT WIN32 AND NOT APPLE)
     set_target_properties(PrusaSlicer PROPERTIES OUTPUT_NAME "prusa-slicer")
 endif ()
 
-target_link_libraries(PrusaSlicer libslic3r cereal)
+target_link_libraries(PrusaSlicer libslic3r libcereal)
+
 if (APPLE)
 #    add_compile_options(-stdlib=libc++)
 #    add_definitions(-DBOOST_THREAD_DONT_USE_CHRONO -DBOOST_NO_CXX11_RVALUE_REFERENCES -DBOOST_THREAD_USES_MOVE)
@@ -214,6 +212,13 @@ if (WIN32)
                 COMMENT "Symlinking the resources directory into the build tree"
                 VERBATIM
             )
+
+            if (SLIC3R_GUI)
+                add_custom_command(TARGET PrusaSlicer POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy
+                    "${wxWidgets_ROOT_DIR}/bin/WebView2Loader.dll"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${CONF}/WebView2Loader.dll")
+            endif()
         endforeach ()
     else ()
         file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/resources" WIN_RESOURCES_SYMLINK)
@@ -222,6 +227,12 @@ if (WIN32)
             COMMENT "Symlinking the resources directory into the build tree"
             VERBATIM
         )
+        if (SLIC3R_GUI)
+            add_custom_command(TARGET PrusaSlicer POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy
+                "${wxWidgets_ROOT_DIR}/bin/WebView2Loader.dll"
+                "${CMAKE_CURRENT_BINARY_DIR}/${CONF}/WebView2Loader.dll")
+        endif()
     endif ()
 
     # This has to be a separate target due to the windows command line lenght limits

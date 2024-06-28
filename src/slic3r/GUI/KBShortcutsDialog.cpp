@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01, David Kocík @kocikdav, Tomáš Mészáros @tamasmeszaros, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "libslic3r/libslic3r.h"
 #include "KBShortcutsDialog.hpp"
 #include "I18N.hpp"
@@ -46,19 +50,29 @@ KBShortcutsDialog::KBShortcutsDialog()
     }
 
     wxStdDialogButtonSizer* buttons = this->CreateStdDialogButtonSizer(wxOK);
-    wxGetApp().UpdateDarkUI(static_cast<wxButton*>(this->FindWindowById(wxID_OK, this)));
+    wxGetApp().SetWindowVariantForButton(buttons->GetAffirmativeButton());
+    wxGetApp().UpdateDarkUI(buttons->GetAffirmativeButton());
     this->SetEscapeId(wxID_OK);
     main_sizer->Add(buttons, 0, wxEXPAND | wxALL, 5);
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
     this->CenterOnParent();
+
+#ifdef __linux__
+    // workaround to correct pages layout
+    book->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, [book](wxBookCtrlEvent& e) {
+        book->GetPage(e.GetSelection())->Fit();
+    });
+    const wxSize sz = this->GetBestSize();
+    this->SetSize(sz.x + 1, sz.y);
+#endif
 }
 
 void KBShortcutsDialog::on_dpi_changed(const wxRect& suggested_rect)
 {
-    m_logo_bmp.msw_rescale();
-    m_header_bitmap->SetBitmap(m_logo_bmp.bmp());
+    //m_logo_bmp.msw_rescale();
+    //m_header_bitmap->SetBitmap(m_logo_bmp.bmp());
     msw_buttons_rescale(this, em_unit(), { wxID_OK });
 
     Layout();
@@ -75,12 +89,12 @@ void KBShortcutsDialog::fill_shortcuts()
         Shortcuts commands_shortcuts = {
             // File
             { ctrl + "N", L("New project, clear plater") },
-            { ctrl + "O", L("Open project STL/OBJ/AMF/3MF with config, clear plater") },
+            { ctrl + "O", L("Open project AMF/3MF with config, clear plater") },
             { ctrl + "S", L("Save project (3mf)") },
             { ctrl + alt + "S", L("Save project as (3mf)") },
             { ctrl + "R", L("(Re)slice") },
             // File>Import
-            { ctrl + "I", L("Import STL/OBJ/AMF/3MF without config, keep plater") },
+            { ctrl + "I", L("Import STL/3MF/STEP/OBJ/AMF without config, keep plater") },
             { ctrl + "L", L("Import Config from ini/amf/3mf/gcode") },
             { ctrl + alt + "L", L("Load Config from ini/amf/3mf/gcode and merge") },
             // File>Export
@@ -151,6 +165,10 @@ void KBShortcutsDialog::fill_shortcuts()
             { "F", L("Gizmo Place face on bed") },
             { "H", L("Gizmo SLA hollow") },
             { "L", L("Gizmo SLA support points") },
+            { "L", L("Gizmo FDM paint-on supports") },
+            { "P", L("Gizmo FDM paint-on seam") },
+            { "N", L("Gizmo Multi Material painting") },
+            { "T", L("Gizmo Text emboss / engrave")},
             { "Esc", L("Unselect gizmo or clear selection") },
             { "K", L("Change camera type (perspective, orthographic)") },
             { "B", L("Zoom to Bed") },
@@ -169,10 +187,6 @@ void KBShortcutsDialog::fill_shortcuts()
             { ctrl + "M", L("Show/Hide 3Dconnexion devices settings dialog") },
 #endif // __APPLE__
 #endif // _WIN32
-#if ENABLE_RENDER_PICKING_PASS
-            // Don't localize debugging texts.
-            { "P", "Toggle picking pass texture rendering on/off" },
-#endif // ENABLE_RENDER_PICKING_PASS
         };
 
         m_full_shortcuts.push_back({ { _L("Plater"), "" }, plater_shortcuts });
@@ -190,7 +204,7 @@ void KBShortcutsDialog::fill_shortcuts()
         m_full_shortcuts.push_back({ { _L("Gizmos"), _L("The following shortcuts are applicable when the specified gizmo is active") }, gizmos_shortcuts });
 
         Shortcuts object_list_shortcuts = {
-            { "P", L("Set selected items as Ptrintable/Unprintable") },
+            { "P", L("Set selected items as Printable/Unprintable") },
             { "0", L("Set default extruder for the selected items") },
             { "1-9", L("Set extruder number for the selected items") },
         };
@@ -220,10 +234,8 @@ void KBShortcutsDialog::fill_shortcuts()
         { "A", L("Horizontal slider - Move active thumb Left") },
         { "D", L("Horizontal slider - Move active thumb Right") },
         { "X", L("On/Off one layer mode of the vertical slider") },
-        { "L", L("Show/Hide Legend and Estimated printing time") },
-#if ENABLE_GCODE_WINDOW
+        { "L", L("Show/Hide legend") },
         { "C", L("Show/Hide G-code window") },
-#endif // ENABLE_GCODE_WINDOW
     };
 
     m_full_shortcuts.push_back({ { _L("Preview"), "" }, preview_shortcuts });
@@ -269,8 +281,8 @@ wxPanel* KBShortcutsDialog::create_header(wxWindow* parent, const wxFont& bold_f
     sizer->AddStretchSpacer();
 
     // logo
-    m_logo_bmp = ScalableBitmap(this, wxGetApp().is_editor() ? "PrusaSlicer_32px.png" : "PrusaSlicer-gcodeviewer_32px.png", 32);
-    m_header_bitmap = new wxStaticBitmap(panel, wxID_ANY, m_logo_bmp.bmp());
+    m_header_bitmap = new wxStaticBitmap(panel, wxID_ANY, *get_bmp_bundle(wxGetApp().logo_name(), 32));
+
     sizer->Add(m_header_bitmap, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
 
     // text

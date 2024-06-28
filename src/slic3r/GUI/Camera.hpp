@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2022 Enrico Turri @enricoturri1966, Filip Sykala @Jony01, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Camera_hpp_
 #define slic3r_Camera_hpp_
 
@@ -18,7 +22,7 @@ struct Camera
     static double FrustrumZMargin;
     static double MaxFovDeg;
 
-    enum EType : unsigned char
+    enum class EType : unsigned char
     {
         Unknown,
         Ortho,
@@ -29,7 +33,7 @@ struct Camera
     bool requires_zoom_to_bed{ false };
 
 private:
-    EType m_type{ Perspective };
+    EType m_type{ EType::Perspective };
     bool m_update_config_on_type_change_enabled{ false };
     Vec3d m_target{ Vec3d::Zero() };
     float m_zenit{ 45.0f };
@@ -54,7 +58,7 @@ public:
     std::string get_type_as_string() const;
     void set_type(EType type);
     // valid values for type: "0" -> ortho, "1" -> perspective
-    void set_type(const std::string& type) { set_type((type == "1") ? Perspective : Ortho); }
+    void set_type(const std::string& type) { set_type((type == "1") ? EType::Perspective : EType::Ortho); }
     void select_next_type();
 
     void enable_update_config_on_type_change(bool enable) { m_update_config_on_type_change_enabled = enable; }
@@ -89,13 +93,21 @@ public:
     double get_far_z() const { return m_frustrum_zs.second; }
     const std::pair<double, double>& get_z_range() const { return m_frustrum_zs; }
 
+    double get_near_left() const;
+    double get_near_right() const;
+    double get_near_top() const;
+    double get_near_bottom() const;
+    double get_near_width() const;
+    double get_near_height() const;
+
     double get_fov() const;
 
-    void apply_viewport(int x, int y, unsigned int w, unsigned int h);
-    void apply_view_matrix();
+    void set_viewport(int x, int y, unsigned int w, unsigned int h);
+    void apply_viewport() const;
     // Calculates and applies the projection matrix tighting the frustrum z range around the given box.
     // If larger z span is needed, pass the desired values of near and far z (negative values are ignored)
     void apply_projection(const BoundingBoxf3& box, double near_z = -1.0, double far_z = -1.0);
+    void apply_projection(double left, double right, double bottom, double top, double near_z, double far_z);
 
     void zoom_to_box(const BoundingBoxf3& box, double margin_factor = DefaultZoomToBoxMarginFactor);
     void zoom_to_volumes(const GLVolumePtrs& volumes, double margin_factor = DefaultZoomToVolumesMarginFactor);

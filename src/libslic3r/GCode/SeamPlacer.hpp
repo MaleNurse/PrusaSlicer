@@ -1,109 +1,67 @@
+///|/ Copyright (c) Prusa Research 2020 - 2022 Pavel Mikuš @Godrak, Lukáš Matěna @lukasmatena,
+/// Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef libslic3r_SeamPlacer_hpp_
 #define libslic3r_SeamPlacer_hpp_
 
 #include <optional>
+#include <vector>
+#include <memory>
+#include <atomic>
 
+#include "libslic3r/GCode/SeamAligned.hpp"
 #include "libslic3r/Polygon.hpp"
-#include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/BoundingBox.hpp"
-#include "libslic3r/AABBTreeIndirect.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/GCode/SeamPerimeters.hpp"
+#include "libslic3r/GCode/SeamChoice.hpp"
+#include "libslic3r/GCode/ModelVisibility.hpp"
 
-namespace Slic3r {
+namespace Slic3r::Seams {
 
-class PrintObject;
-class ExtrusionLoop;
-class Print;
-class Layer;
-namespace EdgeGrid { class Grid; }
+using ObjectSeams =
+    std::unordered_map<const PrintObject *, std::vector<std::vector<SeamPerimeterChoice>>>;
+using ObjectLayerPerimeters = std::unordered_map<const PrintObject *, Perimeters::LayerPerimeters>;
 
-
-class SeamHistory {
-public:
-    SeamHistory() { clear(); }
-    std::optional<Point> get_last_seam(const PrintObject* po, size_t layer_id, const BoundingBox& island_bb);
-    void add_seam(const PrintObject* po, const Point& pos, const BoundingBox& island_bb);
-    void clear();
-
-private:
-    struct SeamPoint {
-        Point m_pos;
-        BoundingBox m_island_bb;
-    };
-
-    std::map<const PrintObject*, std::vector<SeamPoint>> m_data_last_layer;
-    std::map<const PrintObject*, std::vector<SeamPoint>> m_data_this_layer;
-    size_t m_layer_id;
+struct Params
+{
+    double max_nearest_detour;
+    double rear_tolerance;
+    double rear_y_offset;
+    Aligned::Params aligned;
+    double max_distance{};
+    unsigned random_seed{};
+    double convex_visibility_modifier{};
+    double concave_visibility_modifier{};
+    Perimeters::PerimeterParams perimeter;
+    Slic3r::ModelInfo::Visibility::Params visibility;
+    SeamPosition seam_preference;
+    bool staggered_inner_seams;
 };
 
+std::ostream& operator<<(std::ostream& os, const Params& params);
 
-
-class SeamPlacer {
+class Placer
+{
 public:
-    void init(const Print& print);
+    static Params get_params(const DynamicPrintConfig &config);
 
-    Point get_seam(const Layer& layer, const SeamPosition seam_position,
-                   const ExtrusionLoop& loop, Point last_pos,
-                   coordf_t nozzle_diameter, const PrintObject* po,
-                   bool was_clockwise, const EdgeGrid::Grid* lower_layer_edge_grid);
+    void init(
+        SpanOfConstPtrs<PrintObject> objects,
+        const Params &params,
+        const std::function<void(void)> &throw_if_canceled
+    );
 
-    using TreeType = AABBTreeIndirect::Tree<2, coord_t>;
-    using AlignedBoxType = Eigen::AlignedBox<TreeType::CoordType, TreeType::NumDimensions>;
+    Point place_seam(const Layer *layer, const ExtrusionLoop &loop, const Point &last_pos) const;
 
 private:
-
-    struct CustomTrianglesPerLayer {
-        Polygons polys;
-        TreeType tree;
-    };
-
-    // Just a cache to save some lookups.
-    const Layer* m_last_layer_po = nullptr;
-    coordf_t m_last_print_z = -1.;
-    const PrintObject* m_last_po = nullptr;
-
-    bool m_last_loop_was_external = true;
-
-    std::vector<std::vector<CustomTrianglesPerLayer>> m_enforcers;
-    std::vector<std::vector<CustomTrianglesPerLayer>> m_blockers;
-    std::vector<const PrintObject*> m_po_list;
-
-    //std::map<const PrintObject*, Point>  m_last_seam_position;
-    SeamHistory  m_seam_history;
-
-    // Get indices of points inside enforcers and blockers.
-    void get_enforcers_and_blockers(size_t layer_id,
-                                    const Polygon& polygon,
-                                    size_t po_id,
-                                    std::vector<size_t>& enforcers_idxs,
-                                    std::vector<size_t>& blockers_idxs) const;
-
-    // Apply penalties to points inside enforcers/blockers.
-    void apply_custom_seam(const Polygon& polygon, size_t po_id,
-                           std::vector<float>& penalties,
-                           const std::vector<float>& lengths,
-                           int layer_id, SeamPosition seam_position) const;
-
-    // Return random point of a polygon. The distribution will be uniform
-    // along the contour and account for enforcers and blockers.
-    Point get_random_seam(size_t layer_idx, const Polygon& polygon, size_t po_id,
-                          bool* saw_custom = nullptr) const;
-
-    // Is there any enforcer/blocker on this layer?
-    bool is_custom_seam_on_layer(size_t layer_id, size_t po_idx) const {
-        return is_custom_enforcer_on_layer(layer_id, po_idx)
-            || is_custom_blocker_on_layer(layer_id, po_idx);
-    }
-
-    bool is_custom_enforcer_on_layer(size_t layer_id, size_t po_idx) const {
-        return (! m_enforcers.at(po_idx).empty() && ! m_enforcers.at(po_idx)[layer_id].polys.empty());
-    }
-
-    bool is_custom_blocker_on_layer(size_t layer_id, size_t po_idx) const {
-        return (! m_blockers.at(po_idx).empty() && ! m_blockers.at(po_idx)[layer_id].polys.empty());
-    }
+    Params params;
+    ObjectSeams seams_per_object;
+    ObjectLayerPerimeters perimeters_per_layer;
 };
 
-
-}
+} // namespace Slic3r::Seams
 
 #endif // libslic3r_SeamPlacer_hpp_

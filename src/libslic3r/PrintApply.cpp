@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2023 Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak, Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Lukáš Hejl @hejllukas, Roman Beránek @zavorka
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Model.hpp"
 #include "Print.hpp"
 
@@ -74,8 +78,8 @@ static inline void model_volume_list_copy_configs(ModelObject &model_object_dst,
         mv_dst.supported_facets.assign(mv_src.supported_facets);
         assert(mv_dst.seam_facets.id() == mv_src.seam_facets.id());
         mv_dst.seam_facets.assign(mv_src.seam_facets);
-        assert(mv_dst.mmu_segmentation_facets.id() == mv_src.mmu_segmentation_facets.id());
-        mv_dst.mmu_segmentation_facets.assign(mv_src.mmu_segmentation_facets);
+        assert(mv_dst.mm_segmentation_facets.id() == mv_src.mm_segmentation_facets.id());
+        mv_dst.mm_segmentation_facets.assign(mv_src.mm_segmentation_facets);
         //FIXME what to do with the materials?
         // mv_dst.m_material_id = mv_src.m_material_id;
         ++ i_src;
@@ -130,13 +134,14 @@ struct PrintObjectTrafoAndInstances
 };
 
 // Generate a list of trafos and XY offsets for instances of a ModelObject
-static std::vector<PrintObjectTrafoAndInstances> print_objects_from_model_object(const ModelObject &model_object)
+static std::vector<PrintObjectTrafoAndInstances> print_objects_from_model_object(const ModelObject &model_object, const Vec3d &shrinkage_compensation)
 {
     std::set<PrintObjectTrafoAndInstances> trafos;
     PrintObjectTrafoAndInstances           trafo;
     for (ModelInstance *model_instance : model_object.instances)
         if (model_instance->is_printable()) {
-            trafo.trafo = model_instance->get_matrix();
+            Geometry::Transformation model_instance_transformation = model_instance->get_transformation();
+            trafo.trafo = model_instance_transformation.get_matrix_with_applied_shrinkage_compensation(shrinkage_compensation);
             auto shift = Point::new_scale(trafo.trafo.data()[12], trafo.trafo.data()[13]);
             // Reset the XY axes of the transformation.
             trafo.trafo.data()[12] = 0;
@@ -165,34 +170,37 @@ static bool layer_height_ranges_equal(const t_layer_config_ranges &lr1, const t_
     return true;
 }
 
-// Returns true if va == vb when all CustomGCode items that are not ToolChangeCode are ignored.
-static bool custom_per_printz_gcodes_tool_changes_differ(const std::vector<CustomGCode::Item> &va, const std::vector<CustomGCode::Item> &vb)
-{
+// Returns true if va == vb when all CustomGCode items that are not the specified type (not_ignore_type) are ignored.
+static bool custom_per_printz_gcodes_tool_changes_differ(
+    const std::vector<CustomGCode::Item> &va,
+    const std::vector<CustomGCode::Item> &vb,
+    CustomGCode::Type                     not_ignore_type
+) {
 	auto it_a = va.begin();
 	auto it_b = vb.begin();
 	while (it_a != va.end() || it_b != vb.end()) {
-		if (it_a != va.end() && it_a->type != CustomGCode::ToolChange) {
-			// Skip any CustomGCode items, which are not tool changes.
+		if (it_a != va.end() && it_a->type != not_ignore_type) {
+			// Skip any CustomGCode items, which are not equal to not_ignore_type.
 			++ it_a;
 			continue;
 		}
-		if (it_b != vb.end() && it_b->type != CustomGCode::ToolChange) {
-			// Skip any CustomGCode items, which are not tool changes.
+		if (it_b != vb.end() && it_b->type != not_ignore_type) {
+			// Skip any CustomGCode items, which are not equal to not_ignore_type.
 			++ it_b;
 			continue;
 		}
 		if (it_a == va.end() || it_b == vb.end())
-			// va or vb contains more Tool Changes than the other.
+			// va or vb contains more items of not_ignore_type than the other.
 			return true;
-		assert(it_a->type == CustomGCode::ToolChange);
-		assert(it_b->type == CustomGCode::ToolChange);
+		assert(it_a->type == not_ignore_type);
+		assert(it_b->type == not_ignore_type);
 		if (*it_a != *it_b)
-			// The two Tool Changes differ.
+			// The two items of not_ignore_type differ.
 			return true;
 		++ it_a;
 		++ it_b;
 	}
-	// There is no change in custom Tool Changes.
+	// There is no change in specified not_ignore_type items.
 	return false;
 }
 
@@ -216,22 +224,25 @@ static t_config_option_keys print_config_diffs(
         const ConfigOption *opt_new_filament = std::binary_search(extruder_retract_keys.begin(), extruder_retract_keys.end(), opt_key) ? new_full_config.option(filament_prefix + opt_key) : nullptr;
         if (opt_new_filament != nullptr && ! opt_new_filament->is_nil()) {
             // An extruder retract override is available at some of the filament presets.
-            if (*opt_old != *opt_new || opt_new->overriden_by(opt_new_filament)) {
+            bool overriden = opt_new->overriden_by(opt_new_filament);
+            if (overriden || *opt_old != *opt_new) {
                 auto opt_copy = opt_new->clone();
                 opt_copy->apply_override(opt_new_filament);
-                if (*opt_old == *opt_copy)
-                    delete opt_copy;
-                else {
-                    filament_overrides.set_key_value(opt_key, opt_copy);
+                bool changed = *opt_old != *opt_copy;
+                if (changed)
                     print_diff.emplace_back(opt_key);
-                }
+                if (changed || overriden) {
+                    // filament_overrides will be applied to the placeholder parser, which layers these parameters over full_print_config.
+                    filament_overrides.set_key_value(opt_key, opt_copy);
+                } else
+                    delete opt_copy;
             }
         } else if (*opt_new != *opt_old)
             print_diff.emplace_back(opt_key);
     }
 
     return print_diff;
- }
+}
 
 // Prepare for storing of the full print config into new_full_config to be exported into the G-code and to be used by the PlaceholderParser.
 static t_config_option_keys full_print_config_diffs(const DynamicPrintConfig &current_full_config, const DynamicPrintConfig &new_full_config)
@@ -601,10 +612,35 @@ void print_objects_regions_invalidate_keep_some_volumes(PrintObjectRegions &prin
     print_object_regions.cached_volume_ids.erase(print_object_regions.cached_volume_ids.begin() + last_cached_volume, print_object_regions.cached_volume_ids.end());
 }
 
+// Find a bounding box of a volume's part intersecting layer_range. Such a bounding box will likely be smaller in XY than the full bounding box,
+// thus it will intersect with lower number of other volumes.
 const PrintObjectRegions::BoundingBox* find_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const ModelVolume &volume)
 {
     auto it = lower_bound_by_predicate(layer_range.volumes.begin(), layer_range.volumes.end(), [&volume](const PrintObjectRegions::VolumeExtents &l){ return l.volume_id < volume.id(); });
     return it != layer_range.volumes.end() && it->volume_id == volume.id() ? &it->bbox : nullptr;
+}
+
+// Find a bounding box of a topmost printable volume referenced by this modifier given this_region_id.
+PrintObjectRegions::BoundingBox find_modifier_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const int this_region_id)
+{
+    // Find the top-most printable volume of this modifier, or the printable volume itself.
+    const PrintObjectRegions::VolumeRegion &this_region = layer_range.volume_regions[this_region_id];
+    const PrintObjectRegions::BoundingBox *this_extents = find_volume_extents(layer_range, *this_region.model_volume);
+    assert(this_extents);
+    PrintObjectRegions::BoundingBox out { *this_extents };
+    if (! this_region.model_volume->is_model_part())
+        for (int parent_region_id = this_region.parent;;) {
+            assert(parent_region_id >= 0);
+            const PrintObjectRegions::VolumeRegion &parent_region  = layer_range.volume_regions[parent_region_id];
+            const PrintObjectRegions::BoundingBox  *parent_extents = find_volume_extents(layer_range, *parent_region.model_volume);
+            assert(parent_extents);
+            out.clamp(*parent_extents);
+            assert(! out.isEmpty());
+            if (parent_region.model_volume->is_model_part())
+                break;
+            parent_region_id = parent_region.parent;
+        }
+    return out;
 }
 
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders);
@@ -631,11 +667,49 @@ bool verify_update_print_object_regions(
         print_region_ref_reset(*region);
 
     // Verify and / or update PrintRegions produced by ModelVolumes, layer range modifiers, modifier volumes.
-    for (PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges)
+    for (PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges) {
+        // Each modifier ModelVolume intersecting this layer_range shall be referenced here at least once if it intersects some
+        // printable ModelVolume at this layer_range even if it does not modify its overlapping printable ModelVolume configuration yet.
+        // VolumeRegions reference ModelVolumes in layer_range.volume_regions the order they are stored in ModelObject volumes.
+        // Remember whether a given modifier ModelVolume was visited already.
+        auto it_model_volume_modifier_last = model_volumes.end();
         for (PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
             if (region.model_volume->is_model_part() || region.model_volume->is_modifier()) {
                 auto it_model_volume = lower_bound_by_predicate(model_volumes.begin(), model_volumes.end(), [&region](const ModelVolume *l){ return l->id() < region.model_volume->id(); });
                 assert(it_model_volume != model_volumes.end() && (*it_model_volume)->id() == region.model_volume->id());
+                if (region.model_volume->is_modifier() && it_model_volume != it_model_volume_modifier_last) {
+                    // A modifier ModelVolume is visited for the first time.
+                    // A visited modifier may not have had parent volume_regions created overlapping with some model parts or modifiers,
+                    // if the visited modifier did not modify their properties. Now the visited modifier's configuration may have changed,
+                    // which may require new regions to be created.
+                    it_model_volume_modifier_last = it_model_volume;
+                    int next_region_id = int(&region - layer_range.volume_regions.data());
+                    const PrintObjectRegions::BoundingBox *bbox = find_volume_extents(layer_range, *region.model_volume);
+                    assert(bbox);
+                    for (int parent_region_id = next_region_id - 1; parent_region_id >= 0; -- parent_region_id) {
+                        const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
+                        assert(parent_region.model_volume != region.model_volume);
+                        if (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) {
+                            // volume_regions are produced in decreasing order of parent volume_regions ids.
+                            // Some regions may not have been generated the last time by generate_print_object_regions().
+                            assert(next_region_id == int(layer_range.volume_regions.size()) ||
+                                   layer_range.volume_regions[next_region_id].model_volume != region.model_volume ||
+                                   layer_range.volume_regions[next_region_id].parent <= parent_region_id);
+                            if (next_region_id < int(layer_range.volume_regions.size()) && 
+                                layer_range.volume_regions[next_region_id].model_volume == region.model_volume &&
+                                layer_range.volume_regions[next_region_id].parent == parent_region_id) {
+                                // A parent region is already overridden.
+                                ++ next_region_id;
+                            } else if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
+                                // Such parent region does not exist. If it is needed, then we need to reslice.
+                                // Only create new region for a modifier, which actually modifies config of it's parent.
+                                if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, **it_model_volume, num_extruders);
+                                    config != parent_region.region->config())
+                                    // This modifier newly overrides a region, which it did not before. We need to reslice.
+                                    return false;
+                        }
+                    }
+                }
                 PrintRegionConfig cfg = region.parent == -1 ?
                     region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders) :
                     region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders);
@@ -654,6 +728,7 @@ bool verify_update_print_object_regions(
                 }
                 print_region_ref_inc(*region.region);
             }
+    }
 
     // Verify and / or update PrintRegions produced by color painting. 
     for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges)
@@ -725,7 +800,7 @@ void update_volume_bboxes(
                         layer_range.volumes.emplace_back(*it);
                 } else
                     layer_range.volumes.push_back({ model_volume->id(),
-                        transformed_its_bbox2d(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix(false)), offset) });
+                        transformed_its_bbox2d(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix()), offset) });
             }
     } else {
         std::vector<std::vector<PrintObjectRegions::VolumeExtents>> volumes_old;
@@ -757,7 +832,7 @@ void update_volume_bboxes(
                             layer_range.volumes.emplace_back(*it);
                     }
                 } else {
-                    transformed_its_bboxes_in_z_ranges(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix(false)), ranges, bboxes, offset);
+                    transformed_its_bboxes_in_z_ranges(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix()), ranges, bboxes, offset);
                     for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges)
                         if (auto &bbox = bboxes[&layer_range - layer_ranges.data()]; bbox.second)
                             layer_range.volumes.push_back({ model_volume->id(), bbox.first });
@@ -812,7 +887,8 @@ static PrintObjectRegions* generate_print_object_regions(
             layer_ranges_regions.push_back({ range.layer_height_range, range.config });
     }
 
-    update_volume_bboxes(layer_ranges_regions, out->cached_volume_ids, model_volumes, out->trafo_bboxes, std::max(0.f, xy_size_compensation));
+    const bool is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) { return mv->is_mm_painted(); });
+    update_volume_bboxes(layer_ranges_regions, out->cached_volume_ids, model_volumes, out->trafo_bboxes, is_mm_painted ? 0.f : std::max(0.f, xy_size_compensation));
 
     std::vector<PrintRegion*> region_set;
     auto get_create_region = [&region_set, &all_regions](PrintRegionConfig &&config) -> PrintRegion* {
@@ -847,18 +923,26 @@ static PrintObjectRegions* generate_print_object_regions(
                     } else {
                         assert(volume.is_modifier());
                         // Modifiers may be chained one over the other. Check for overlap, merge DynamicPrintConfigs.
-                        for (int parent_region_id = int(layer_range.volume_regions.size()) - 1; parent_region_id >= 0; -- parent_region_id)
-                            if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-                                parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) {
-                                    const PrintObjectRegions::BoundingBox *parent_bbox = find_volume_extents(layer_range, *parent_region.model_volume);
-                                    assert(parent_bbox != nullptr);
-                                    if (parent_bbox->intersects(*bbox))
-                                        layer_range.volume_regions.push_back({
-                                            &volume, parent_region_id,
-                                            get_create_region(region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders)),
-                                            bbox
-                                        });
-                            }
+                        bool added = false;
+                        int  parent_model_part_id = -1;
+                        for (int parent_region_id = int(layer_range.volume_regions.size()) - 1; parent_region_id >= 0; -- parent_region_id) {
+                            const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
+                            const ModelVolume                      &parent_volume = *parent_region.model_volume;
+                            if (parent_volume.is_model_part() || parent_volume.is_modifier())
+                                if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
+                                    // Only create new region for a modifier, which actually modifies config of it's parent.
+                                    if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders); 
+                                        config != parent_region.region->config()) {
+                                        added = true;
+                                        layer_range.volume_regions.push_back({ &volume, parent_region_id, get_create_region(std::move(config)), bbox });
+                                    } else if (parent_model_part_id == -1 && parent_volume.is_model_part())
+                                        parent_model_part_id = parent_region_id;
+                                }
+                        }
+                        if (! added && parent_model_part_id >= 0)
+                            // This modifier does not override any printable volume's configuration, however it may in the future.
+                            // Store it so that verify_update_print_object_regions() will handle this modifier correctly if its configuration changes.
+                            layer_range.volume_regions.push_back({ &volume, parent_model_part_id, layer_range.volume_regions[parent_model_part_id].region, bbox });
                     }
                 }
             }
@@ -903,6 +987,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     DynamicPrintConfig   filament_overrides;
     t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides);
     t_config_option_keys full_config_diff = full_print_config_diffs(m_full_print_config, new_full_config);
+    // If just a physical printer was changed, but printer preset is the same, then there is no need to apply whole print
+    // see https://github.com/prusa3d/PrusaSlicer/issues/8800
+    if (full_config_diff.size() == 1 && full_config_diff[0] == "physical_printer_settings_id")
+        full_config_diff.clear();
+
     // Collect changes to object and region configs.
     t_config_option_keys object_diff      = m_default_object_config.diff(new_full_config);
     t_config_option_keys region_diff      = m_default_region_config.diff(new_full_config);
@@ -927,6 +1016,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     bool   num_extruders_changed = false;
     if (! full_config_diff.empty()) {
         update_apply_status(this->invalidate_step(psGCodeExport));
+        m_placeholder_parser.clear_config();
         // Set the profile aliases for the PrintBase::output_filename()
 		m_placeholder_parser.set("print_preset",              new_full_config.option("print_settings_id")->clone());
 		m_placeholder_parser.set("filament_preset",           new_full_config.option("filament_settings_id")->clone());
@@ -938,6 +1028,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	    // It is also safe to change m_config now after this->invalidate_state_by_config_options() call.
 	    m_config.apply_only(new_full_config, print_diff, true);
 	    //FIXME use move semantics once ConfigBase supports it.
+        // Some filament_overrides may contain values different from new_full_config, but equal to m_config.
+        // As long as these config options don't reallocate memory when copying, we are safe overriding a value, which is in use by a worker thread.
 	    m_config.apply(filament_overrides);
 	    // Handle changes to object config defaults
 	    m_default_object_config.apply_only(new_full_config, object_diff, true);
@@ -945,8 +1037,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	    m_default_region_config.apply_only(new_full_config, region_diff, true);
         m_full_print_config = std::move(new_full_config);
         if (num_extruders != m_config.nozzle_diameter.size()) {
-        	num_extruders = m_config.nozzle_diameter.size();
-        	num_extruders_changed = true;
+            num_extruders = m_config.nozzle_diameter.size();
+            num_extruders_changed = true;
         }
     }
     
@@ -971,11 +1063,20 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 			model_object_status_db.add(*model_object, ModelObjectStatus::New);
     } else {
         if (m_model.custom_gcode_per_print_z != model.custom_gcode_per_print_z) {
-            update_apply_status(num_extruders_changed || 
-            	// Tool change G-codes are applied as color changes for a single extruder printer, no need to invalidate tool ordering.
-            	//FIXME The tool ordering may be invalidated unnecessarily if the custom_gcode_per_print_z.mode is not applicable
-            	// to the active print / model state, and then it is reset, so it is being applicable, but empty, thus the effect is the same.
-            	(num_extruders > 1 && custom_per_printz_gcodes_tool_changes_differ(m_model.custom_gcode_per_print_z.gcodes, model.custom_gcode_per_print_z.gcodes)) ?
+            const CustomGCode::Mode current_mode = m_model.custom_gcode_per_print_z.mode;
+            const CustomGCode::Mode next_mode    = model.custom_gcode_per_print_z.mode;
+
+            const bool multi_extruder_differ = (current_mode == next_mode) && (current_mode == CustomGCode::MultiExtruder || next_mode == CustomGCode::MultiExtruder);
+            // Tool change G-codes are applied as color changes for a single extruder printer, no need to invalidate tool ordering.
+            // FIXME The tool ordering may be invalidated unnecessarily if the custom_gcode_per_print_z.mode is not applicable
+            // to the active print / model state, and then it is reset, so it is being applicable, but empty, thus the effect is the same.
+            const bool tool_change_differ    = num_extruders > 1 && custom_per_printz_gcodes_tool_changes_differ(m_model.custom_gcode_per_print_z.gcodes, model.custom_gcode_per_print_z.gcodes, CustomGCode::ToolChange);
+            // For multi-extruder printers, we perform a tool change before a color change.
+            // So, in that case, we must invalidate tool ordering and wipe tower even if custom color change g-codes differ.
+            const bool color_change_differ   = num_extruders > 1 && (next_mode == CustomGCode::MultiExtruder) && custom_per_printz_gcodes_tool_changes_differ(m_model.custom_gcode_per_print_z.gcodes, model.custom_gcode_per_print_z.gcodes, CustomGCode::ColorChange);
+
+            update_apply_status(
+                (num_extruders_changed || tool_change_differ || multi_extruder_differ || color_change_differ) ?
             	// The Tool Ordering and the Wipe Tower are no more valid.
             	this->invalidate_steps({ psWipeTower, psGCodeExport }) :
             	// There is no change in Tool Changes stored in custom_gcode_per_print_z, therefore there is no need to update Tool Ordering.
@@ -1064,7 +1165,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         // Check whether a model part volume was added or removed, their transformations or order changed.
         // Only volume IDs, volume types, transformation matrices and their order are checked, configuration and other parameters are NOT checked.
         bool solid_or_modifier_differ   = model_volume_list_changed(model_object, model_object_new, solid_or_modifier_types) ||
-                                          model_mmu_segmentation_data_changed(model_object, model_object_new);
+                                          model_mmu_segmentation_data_changed(model_object, model_object_new) ||
+                                          (model_object_new.is_mm_painted() && num_extruders_changed);
         bool supports_differ            = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_BLOCKER) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_ENFORCER);
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
@@ -1106,8 +1208,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     update_apply_status(false);
                 }
                 // Invalidate just the supports step.
-                for (const PrintObjectStatus &print_object_status : print_objects_range)
+                for (const PrintObjectStatus &print_object_status : print_objects_range) {
                     update_apply_status(print_object_status.print_object->invalidate_step(posSupportMaterial));
+                }
                 if (supports_differ) {
                     // Copy just the support volumes.
                     model_volume_list_update_supports(model_object, model_object_new);
@@ -1137,7 +1240,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PARAMETER_MODIFIER);
             layer_height_ranges_copy_configs(model_object.layer_config_ranges /* dst */, model_object_new.layer_config_ranges /* src */);
             // Copy the ModelObject name, input_file and instances. The instances will be compared against PrintObject instances in the next step.
-            model_object.name       = model_object_new.name;
+            if (model_object.name != model_object_new.name) {
+                update_apply_status(this->invalidate_step(psGCodeExport));
+                model_object.name = model_object_new.name;
+            }
             model_object.input_file = model_object_new.input_file;
             // Only refresh ModelInstances if there is any change.
             if (model_object.instances.size() != model_object_new.instances.size() || 
@@ -1155,7 +1261,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	        						           l->get_transformation().get_matrix().isApprox(r->get_transformation().get_matrix()); })) {
 	        	// If some of the instances changed, the bounding box of the updated ModelObject is likely no more valid.
 	        	// This is safe as the ModelObject's bounding box is only accessed from this function, which is called from the main thread only.
-	 			model_object.invalidate_bounding_box();
 	        	// Synchronize the content of instances.
 	        	auto new_instance = model_object_new.instances.begin();
 				for (auto old_instance = model_object.instances.begin(); old_instance != model_object.instances.end(); ++ old_instance, ++ new_instance) {
@@ -1164,6 +1269,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     (*old_instance)->printable 		    = (*new_instance)->printable;
   				}
 	        }
+            // Source / dest object share the same bounding boxes, just copy them.
+            model_object.copy_transformation_caches(model_object_new);
         }
     }
 
@@ -1175,7 +1282,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         // Walk over all new model objects and check, whether there are matching PrintObjects.
         for (ModelObject *model_object : m_model.objects) {
             ModelObjectStatus &model_object_status = const_cast<ModelObjectStatus&>(model_object_status_db.reuse(*model_object));
-            model_object_status.print_instances    = print_objects_from_model_object(*model_object);
+            model_object_status.print_instances    = print_objects_from_model_object(*model_object, this->shrinkage_compensation());
             std::vector<const PrintObjectStatus*> old;
             old.reserve(print_object_status_db.count(*model_object));
             for (const PrintObjectStatus &print_object_status : print_object_status_db.get_range(*model_object))
@@ -1240,7 +1347,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 					deleted_objects = true;
                 }
 			if (new_objects || deleted_objects)
-				update_apply_status(this->invalidate_steps({ psSkirt, psBrim, psWipeTower, psGCodeExport }));
+                update_apply_status(this->invalidate_steps({ psAlertWhenSupportsNeeded, psSkirtBrim, psWipeTower, psGCodeExport }));
 			if (new_objects)
 	            update_apply_status(false);
             print_regions_reshuffled = true;
@@ -1266,11 +1373,23 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             print_object_regions->ref_cnt_inc();
         }
         std::vector<unsigned int> painting_extruders;
-        if (const auto &volumes = print_object.model_object()->volumes; 
-            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return ! v->mmu_segmentation_facets.empty(); }) != volumes.end()) {
-            //FIXME be more specific! Don't enumerate extruders that are not used for painting!
-            painting_extruders.assign(num_extruders, 0);
-            std::iota(painting_extruders.begin(), painting_extruders.end(), 1);
+        if (const auto &volumes = print_object.model_object()->volumes;
+            num_extruders > 1 &&
+            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return ! v->mm_segmentation_facets.empty(); }) != volumes.end()) {
+
+            std::array<bool, static_cast<size_t>(TriangleStateType::Count)> used_facet_states{};
+            for (const ModelVolume *volume : volumes) {
+                const std::vector<bool> &volume_used_facet_states = volume->mm_segmentation_facets.get_data().used_states;
+
+                assert(volume_used_facet_states.size() == used_facet_states.size());
+                for (size_t state_idx = 0; state_idx < std::min(volume_used_facet_states.size(), used_facet_states.size()); ++state_idx)
+                    used_facet_states[state_idx] |= volume_used_facet_states[state_idx];
+            }
+
+            for (size_t state_idx = static_cast<size_t>(TriangleStateType::Extruder1); state_idx < used_facet_states.size(); ++state_idx) {
+                if (used_facet_states[state_idx])
+                    painting_extruders.emplace_back(state_idx);
+            }
         }
         if (model_object_status.print_object_regions_status == ModelObjectStatus::PrintObjectRegionsStatus::Valid) {
             // Verify that the trafo for regions & volume bounding boxes thus for regions is still applicable.
@@ -1291,8 +1410,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     num_extruders,
                     painting_extruders,
                     *print_object_regions,
-                    [&print_object, &update_apply_status](const PrintRegionConfig &old_config, const PrintRegionConfig &new_config, const t_config_option_keys &diff_keys) {
-                        update_apply_status(print_object.invalidate_state_by_config_options(old_config, new_config, diff_keys));
+                    [it_print_object, it_print_object_end, &update_apply_status](const PrintRegionConfig &old_config, const PrintRegionConfig &new_config, const t_config_option_keys &diff_keys) {
+                        for (auto it = it_print_object; it != it_print_object_end; ++it)
+                            if ((*it)->m_shared_regions != nullptr)
+                                update_apply_status((*it)->invalidate_state_by_config_options(old_config, new_config, diff_keys));
                     })) {
                 // Regions are valid, just keep them.
             } else {
@@ -1313,7 +1434,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 m_default_region_config,
                 model_object_status.print_instances.front().trafo,
                 num_extruders,
-                float(print_object.config().xy_size_compensation.value),
+                print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_size_compensation.value),
                 painting_extruders);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
@@ -1352,11 +1473,37 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     for (PrintObject *object : m_objects)
         object->update_slicing_parameters();
 
+    if (apply_status == APPLY_STATUS_CHANGED || apply_status == APPLY_STATUS_INVALIDATED)
+        this->cleanup();
+
 #ifdef _DEBUG
     check_model_ids_equal(m_model, model);
 #endif /* _DEBUG */
 
 	return static_cast<ApplyStatus>(apply_status);
+}
+
+void Print::cleanup()
+{
+    // Invalidate data of a single ModelObject shared by multiple PrintObjects.
+    // Find spans of PrintObjects sharing the same PrintObjectRegions.
+    std::vector<PrintObject*> all_objects(m_objects);
+    std::sort(all_objects.begin(), all_objects.end(), [](const PrintObject *l, const PrintObject *r){ return l->shared_regions() < r->shared_regions(); } );
+    for (auto it = all_objects.begin(); it != all_objects.end();) {
+        PrintObjectRegions *shared_regions = (*it)->m_shared_regions;
+        auto it_begin = it;
+        for (; it != all_objects.end() && shared_regions == (*it)->shared_regions(); ++ it)
+            // Let the PrintObject clean up its data with invalidated milestones.
+            (*it)->cleanup();
+        auto this_objects = SpanOfConstPtrs<PrintObject>(const_cast<const PrintObject* const* const>(&(*it_begin)), it - it_begin);
+        if (! Print::is_shared_print_object_step_valid_unguarded(this_objects, posSupportSpotsSearch))
+            shared_regions->generated_support_points.reset();
+    }    
+}
+
+bool Print::is_shared_print_object_step_valid_unguarded(SpanOfConstPtrs<PrintObject> print_objects, PrintObjectStep print_object_step)
+{
+    return std::any_of(print_objects.begin(), print_objects.end(), [print_object_step](auto po){ return po->is_step_done_unguarded(print_object_step); });
 }
 
 } // namespace Slic3r

@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Tomáš Mészáros @tamasmeszaros, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Exception.hpp"
 #include "MeshBoolean.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -12,11 +16,6 @@
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
 #include <CGAL/Exact_integer.h>
 #include <CGAL/Surface_mesh.h>
-#include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
-#include <CGAL/Polygon_mesh_processing/repair.h>
-#include <CGAL/Polygon_mesh_processing/remesh.h>
-#include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
-#include <CGAL/Polygon_mesh_processing/orientation.h>
 #include <CGAL/Cartesian_converter.h>
 
 namespace Slic3r {
@@ -29,18 +28,17 @@ TriangleMesh eigen_to_triangle_mesh(const EigenMesh &emesh)
 {
     auto &VC = emesh.first; auto &FC = emesh.second;
     
-    Pointf3s points(size_t(VC.rows())); 
-    std::vector<Vec3i> facets(size_t(FC.rows()));
+    indexed_triangle_set its;
+    its.vertices.reserve(size_t(VC.rows()));
+    its.indices.reserve(size_t(FC.rows()));
     
     for (Eigen::Index i = 0; i < VC.rows(); ++i)
-        points[size_t(i)] = VC.row(i);
+        its.vertices.emplace_back(VC.row(i).cast<float>());
     
     for (Eigen::Index i = 0; i < FC.rows(); ++i)
-        facets[size_t(i)] = FC.row(i);
+        its.indices.emplace_back(FC.row(i));
     
-    TriangleMesh out{points, facets};
-    out.require_shared_vertices();
-    return out;
+    return TriangleMesh { std::move(its) };
 }
 
 EigenMesh triangle_mesh_to_eigen(const TriangleMesh &mesh)
@@ -118,6 +116,11 @@ void triangle_mesh_to_cgal(const std::vector<stl_vertex> &                 V,
 {
     if (F.empty()) return;
 
+    size_t vertices_count = V.size();
+    size_t edges_count    = (F.size()* 3) / 2;
+    size_t faces_count    = F.size();
+    out.reserve(vertices_count, edges_count, faces_count);
+
     for (auto &v : V)
         out.add_vertex(typename _Mesh::Point{v.x(), v.y(), v.z()});
 
@@ -126,47 +129,50 @@ void triangle_mesh_to_cgal(const std::vector<stl_vertex> &                 V,
         out.add_face(VI(f(0)), VI(f(1)), VI(f(2)));
 }
 
-inline Vec3d to_vec3d(const _EpicMesh::Point &v)
+inline Vec3f to_vec3f(const _EpicMesh::Point& v)
 {
-    return {v.x(), v.y(), v.z()};
+    return { float(v.x()), float(v.y()), float(v.z()) };
 }
 
-inline Vec3d to_vec3d(const _EpecMesh::Point &v)
+inline Vec3f to_vec3f(const _EpecMesh::Point& v)
 {
     CGAL::Cartesian_converter<EpecKernel, EpicKernel> cvt;
     auto iv = cvt(v);
-    return {iv.x(), iv.y(), iv.z()};
+    return { float(iv.x()), float(iv.y()), float(iv.z()) };
 }
 
-template<class _Mesh> TriangleMesh cgal_to_triangle_mesh(const _Mesh &cgalmesh)
+template<class _Mesh>
+indexed_triangle_set cgal_to_indexed_triangle_set(const _Mesh &cgalmesh)
 {
-    Pointf3s points;
-    std::vector<Vec3i> facets;
-    points.reserve(cgalmesh.num_vertices());
-    facets.reserve(cgalmesh.num_faces());
+    indexed_triangle_set its;
+    its.vertices.reserve(cgalmesh.num_vertices());
+    its.indices.reserve(cgalmesh.num_faces());
     
-    for (auto &vi : cgalmesh.vertices()) {
+    const auto &faces = cgalmesh.faces();
+    const auto &vertices = cgalmesh.vertices();
+    int vsize = int(vertices.size());
+
+    for (const auto &vi : vertices) {
         auto &v = cgalmesh.point(vi); // Don't ask...
-        points.emplace_back(to_vec3d(v));
+        its.vertices.emplace_back(to_vec3f(v));
     }
-    
-    for (auto &face : cgalmesh.faces()) {
+
+    for (const auto &face : faces) {
         auto vtc = cgalmesh.vertices_around_face(cgalmesh.halfedge(face));
 
         int i = 0;
         Vec3i facet;
         for (auto v : vtc) {
-            if (i > 2) { i = 0; break; }
-            facet(i++) = v;
+            int iv = v;
+            if (i > 2 || iv < 0 || iv >= vsize) { i = 0; break; }
+            facet(i++) = iv;
         }
 
         if (i == 3)
-            facets.emplace_back(facet);
+            its.indices.emplace_back(facet);
     }
     
-    TriangleMesh out{points, facets};
-    out.repair();
-    return out;
+    return its;
 }
 
 std::unique_ptr<CGALMesh, CGALMeshDeleter>
@@ -180,7 +186,12 @@ triangle_mesh_to_cgal(const std::vector<stl_vertex> &V,
 
 TriangleMesh cgal_to_triangle_mesh(const CGALMesh &cgalmesh)
 {
-    return cgal_to_triangle_mesh(cgalmesh.m);
+    return TriangleMesh{cgal_to_indexed_triangle_set(cgalmesh.m)};
+}
+
+indexed_triangle_set cgal_to_indexed_triangle_set(const CGALMesh &cgalmesh)
+{
+    return cgal_to_indexed_triangle_set(cgalmesh.m);
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -235,16 +246,28 @@ bool does_self_intersect(const CGALMesh &mesh) { return CGALProc::does_self_inte
 // Now the public functions for TriangleMesh input:
 // /////////////////////////////////////////////////////////////////////////////
 
+template<class Op> void _mesh_boolean_do(Op &&op, indexed_triangle_set &A, const indexed_triangle_set &B)
+{
+    CGALMesh meshA;
+    CGALMesh meshB;
+    triangle_mesh_to_cgal(A.vertices, A.indices, meshA.m);
+    triangle_mesh_to_cgal(B.vertices, B.indices, meshB.m);
+    
+    _cgal_do(op, meshA, meshB);
+    
+    A = cgal_to_indexed_triangle_set(meshA.m);
+}
+
 template<class Op> void _mesh_boolean_do(Op &&op, TriangleMesh &A, const TriangleMesh &B)
 {
     CGALMesh meshA;
     CGALMesh meshB;
     triangle_mesh_to_cgal(A.its.vertices, A.its.indices, meshA.m);
     triangle_mesh_to_cgal(B.its.vertices, B.its.indices, meshB.m);
-    
+
     _cgal_do(op, meshA, meshB);
-    
-    A = cgal_to_triangle_mesh(meshA.m);
+
+    A = cgal_to_triangle_mesh(meshA);
 }
 
 void minus(TriangleMesh &A, const TriangleMesh &B)
@@ -262,6 +285,21 @@ void intersect(TriangleMesh &A, const TriangleMesh &B)
     _mesh_boolean_do(_cgal_intersection, A, B);
 }
 
+void minus(indexed_triangle_set &A, const indexed_triangle_set &B)
+{
+    _mesh_boolean_do(_cgal_diff, A, B);
+}
+
+void plus(indexed_triangle_set &A, const indexed_triangle_set &B)
+{
+    _mesh_boolean_do(_cgal_union, A, B);
+}
+
+void intersect(indexed_triangle_set &A, const indexed_triangle_set &B)
+{
+    _mesh_boolean_do(_cgal_intersection, A, B);
+}
+
 bool does_self_intersect(const TriangleMesh &mesh)
 {
     CGALMesh cgalm;
@@ -273,7 +311,17 @@ void CGALMeshDeleter::operator()(CGALMesh *ptr) { delete ptr; }
 
 bool does_bound_a_volume(const CGALMesh &mesh)
 {
-    return CGALProc::does_bound_a_volume(mesh.m);
+    return CGAL::is_closed(mesh.m) && CGALProc::does_bound_a_volume(mesh.m);
+}
+
+bool empty(const CGALMesh &mesh)
+{
+    return mesh.m.is_empty();
+}
+
+CGALMeshPtr clone(const CGALMesh &m)
+{
+    return CGALMeshPtr{new CGALMesh{m}};
 }
 
 } // namespace cgal
