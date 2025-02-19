@@ -1,9 +1,4 @@
-name: Run static analysis
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
+name: Run static 
 
 jobs:
   static_analysis_dev:
